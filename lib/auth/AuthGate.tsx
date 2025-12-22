@@ -1,58 +1,55 @@
-// lib/auth/AuthGate.tsx
-// - A안(리다이렉트 없이 조건부 렌더링) 가드 컴포넌트
-// - 로그인 전: 로그인 안내 UI 렌더링
-// - 로그인 후: children(보호된 기능 UI) 렌더링
-
 "use client";
+
+// lib/auth/AuthGate.tsx
+// - 로그인 상태가 필요할 때 감싸는 게이트 컴포넌트
+// - 요구사항상 "강제 리다이렉트"는 하지 않음
+// - useAuth()의 반환 필드명(user, loading, initError)에 맞춰 타입 에러 해결
 
 import { ReactNode } from "react";
 import { useAuth } from "@/lib/auth/useAuth";
 
 type AuthGateProps = {
   children: ReactNode;
-  // 로그인 전 노출할 UI를 커스터마이즈하고 싶을 때 사용
+  /** 로그인/초기화 오류/비로그인 상태일 때 표시할 UI */
   fallback?: ReactNode;
 };
 
 export default function AuthGate({ children, fallback }: AuthGateProps) {
-  const { user, loading, errorMsg } = useAuth();
+  const { user, loading, initError } = useAuth();
 
-  // 로딩 중 표시
+  // ✅ 로딩 중
   if (loading) {
     return (
-      <div className="p-10">
-        <p className="text-gray-600 dark:text-gray-300">로그인 상태 확인 중...</p>
-      </div>
-    );
-  }
-
-  // 환경변수 누락 등 오류 표시
-  if (errorMsg) {
-    return (
-      <div className="p-10">
-        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-          {errorMsg}
-        </div>
-      </div>
-    );
-  }
-
-  // 로그인 전: fallback UI
-  if (!user) {
-    return (
       fallback ?? (
-        <div className="p-10">
-          <h2 className="text-xl font-bold mb-2">로그인이 필요합니다</h2>
-          <p className="text-gray-600 dark:text-gray-300">
-            이 페이지의 기능은 로그인 후에 사용할 수 있습니다.
-          </p>
-          {/* ⚠️ 여기서는 리다이렉트 하지 않습니다(A안).
-              사용자는 직접 로그인 화면에서 로그인 후 다시 접근하면 됩니다. */}
+        <div className="p-6 text-sm text-gray-600 dark:text-gray-300">
+          Loading...
         </div>
       )
     );
   }
 
-  // 로그인 후: 보호된 UI 렌더링
+  // ✅ Firebase 초기화 에러(환경변수 누락 등)
+  if (initError) {
+    return (
+      fallback ?? (
+        <div className="p-6 text-sm text-red-600 dark:text-red-300">
+          {initError}
+        </div>
+      )
+    );
+  }
+
+  // ✅ 비로그인
+  if (!user) {
+    return (
+      fallback ?? (
+        <div className="p-6 text-sm text-gray-600 dark:text-gray-300">
+          로그인 후 이용 가능합니다. (우측 상단에서 로그인)
+        </div>
+      )
+    );
+  }
+
+  // ✅ 로그인 완료
   return <>{children}</>;
 }
