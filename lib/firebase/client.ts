@@ -1,13 +1,17 @@
 // lib/firebase/client.ts
 // - Firebase Client SDK 초기화(중복 초기화 방지)
-// - Auth 인스턴스를 싱글톤으로 제공
+// - Auth / Firestore 인스턴스를 싱글톤으로 제공
 // - NEXT_PUBLIC_FIREBASE_* 환경변수가 없으면 명확한 에러를 던짐
 
 import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
 import { getAuth, type Auth } from "firebase/auth";
+// ✅ Firestore 추가
+import { getFirestore, type Firestore } from "firebase/firestore";
 
 let _app: FirebaseApp | null = null;
 let _auth: Auth | null = null;
+// ✅ Firestore 싱글톤
+let _db: Firestore | null = null;
 
 /** Firebase App 싱글톤 반환 */
 export function getFirebaseApp(): FirebaseApp {
@@ -48,4 +52,13 @@ export function getFirebaseAuth(): Auth {
   const app = getFirebaseApp();
   _auth = getAuth(app);
   return _auth;
+}
+
+/** ✅ Firestore 싱글톤 반환 */
+export function getFirebaseDb(): Firestore {
+  if (_db) return _db;
+
+  const app = getFirebaseApp();
+  _db = getFirestore(app);
+  return _db;
 }
