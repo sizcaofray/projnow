@@ -1,14 +1,13 @@
 // app/contents/layout.tsx
-// contents 이하 페이지들의 공통 프레임 레이아웃
-// Header(상단) + Sidebar(좌측) + Main(children) + Footer(하단)
-// 서비스명: projnow
+// contents 이하 페이지들의 공통 프레임 레이아웃 (Server Component)
+// ※ Server Component에서는 onClick 등 이벤트 핸들러를 사용할 수 없으므로,
+//    버튼 인터랙션은 Link로 대체합니다.
 
 import type { ReactNode } from "react";
 import Link from "next/link";
 
 export default function ContentsLayout({ children }: { children: ReactNode }) {
   return (
-    // 전체 화면을 세로 플렉스 구조로 분리
     <div className="min-h-screen flex flex-col">
       {/* =========================
        * Header
@@ -22,26 +21,33 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
             </Link>
           </div>
 
-          {/* 우측: 로그인 / 메일 / 로그아웃 (다음 단계에서 Auth 연동) */}
+          {/* 우측: 로그인 / 메일 / 로그아웃 (일단 Link로만 구성) */}
           <div className="flex items-center gap-2 justify-end">
+            {/* 로그인 페이지로 이동 */}
             <Link
               href="/"
               className="px-3 py-1.5 rounded border border-gray-200 dark:border-gray-800 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
+              title="로그인 페이지로 이동"
             >
               로그인
             </Link>
 
-            <div className="px-3 py-1.5 rounded bg-gray-100 dark:bg-gray-800 text-sm text-gray-700 dark:text-gray-200">
+            {/* 다음 단계에서 실제 사용자 이메일로 교체 */}
+            <div
+              className="px-3 py-1.5 rounded bg-gray-100 dark:bg-gray-800 text-sm text-gray-700 dark:text-gray-200"
+              title="다음 단계에서 사용자 이메일 표시로 교체됩니다"
+            >
               mail@example.com
             </div>
 
-            <button
-              type="button"
+            {/* 로그아웃: 다음 단계에서 Firebase 로그아웃 처리로 교체 */}
+            <Link
+              href="/"
               className="px-3 py-1.5 rounded border border-gray-200 dark:border-gray-800 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-              onClick={() => alert("로그아웃 로직은 다음 단계에서 연결됩니다.")}
+              title="(임시) 메인으로 이동 — 다음 단계에서 실제 로그아웃으로 교체"
             >
               로그아웃
-            </button>
+            </Link>
           </div>
         </div>
       </header>
@@ -88,7 +94,6 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
               Canvas
             </Link>
 
-            {/* 관리자 메뉴 (권한 분기는 이후 단계) */}
             <div className="pt-3 mt-3 border-t border-gray-200 dark:border-gray-800">
               <Link
                 href="/contents/server"
@@ -100,7 +105,7 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
           </nav>
         </aside>
 
-        {/* Main Content */}
+        {/* Main */}
         <main className="flex-1 min-w-0 min-h-0 overflow-auto">
           <div className="p-6">{children}</div>
         </main>
@@ -112,20 +117,13 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
       <footer className="border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
         <div className="h-12 px-4 flex items-center justify-between text-sm text-gray-600 dark:text-gray-300">
           <div className="flex items-center gap-4">
-            <button
-              type="button"
-              className="hover:underline"
-              onClick={() => alert("이용약관 페이지는 다음 단계에서 연결됩니다.")}
-            >
+            {/* 페이지는 다음 단계에서 실제로 만들거나 라우팅 연결 */}
+            <Link href="/contents/terms" className="hover:underline">
               이용약관
-            </button>
-            <button
-              type="button"
-              className="hover:underline"
-              onClick={() => alert("개인정보처리방침 페이지는 다음 단계에서 연결됩니다.")}
-            >
+            </Link>
+            <Link href="/contents/privacy" className="hover:underline">
               개인정보처리방침
-            </button>
+            </Link>
           </div>
 
           <div className="text-xs text-gray-500 dark:text-gray-400">
