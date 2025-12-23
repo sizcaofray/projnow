@@ -3,7 +3,7 @@
 // 반영사항:
 // 1) 헤더 우측: 구독 버튼 1개만 노출
 // 2) 좌측 메뉴: 샘플 메뉴 + "Menu Setting"(실제 라우트는 기존 /contents/menu로 연결)
-// 3) "User Management" 메뉴 추가 → /user 로 이동
+// 3) User Management 메뉴 추가 → /user
 
 import type { ReactNode } from "react";
 import Link from "next/link";
@@ -70,7 +70,7 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
                 Menu Setting
               </Link>
 
-              {/* ✅ 신규: User Management (/user) */}
+              {/* ✅ 추가: User Management (/user) */}
               <Link
                 href="/user"
                 className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"

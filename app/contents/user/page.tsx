@@ -2,14 +2,12 @@
 // User Management
 // - Firestore users 컬렉션의 사용자 목록 조회
 // - role(admin/user) 수정 및 저장
-// - 인터랙션이 있으므로 Client Component로 구성
+// - 인터랙션이 있으므로 Client Component
 
 "use client";
 
 import { useEffect, useState } from "react";
 import { collection, doc, getDocs, updateDoc } from "firebase/firestore";
-
-// ✅ 프로젝트의 Firebase 초기화 파일 경로에 맞게 유지/수정
 import { db } from "@/lib/firebase/firebase";
 
 type UserDoc = {
@@ -43,7 +41,6 @@ export default function UserManagementPage() {
           isSubscribed: Boolean(data.isSubscribed),
         };
       });
-
       setUsers(list);
     } catch (e: any) {
       setErrorMsg(e?.message ?? "유저 목록을 불러오는 중 오류가 발생했습니다.");
@@ -87,7 +84,7 @@ export default function UserManagementPage() {
       <div>
         <h1 className="text-2xl font-bold">User Management</h1>
         <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">
-          등록된 사용자들과 Role을 관리합니다.
+          등록된 사용자 목록을 확인하고 Role을 관리합니다.
         </p>
       </div>
 
