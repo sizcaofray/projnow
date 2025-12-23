@@ -4,13 +4,11 @@
 // ✅ 트리(계층) + 드래그 정렬 + 하위메뉴 생성 UI
 // ✅ 메뉴는 "표시/정렬/소속"만 관리
 // - 입력: 메뉴명(name) + 폴더명(slug)
-// - path는 자동 생성: /contents/{slug}
+// - path는 자동 생성: /contents/{slug} (표시는 유지)
 // - 실제 페이지(app/contents/{slug}/page.tsx)는 관리자가 직접 생성/개발
-// ✅ 관리자 판정은 Firestore users/{uid}.role === 'admin' 기준 (rules와 일치)
-
-// ⚠️ 주의
-// - 드래그 정렬은 "같은 parentId(같은 레벨)" 내에서만 지원(안전한 1차 구현)
-// - 다른 부모로 옮기기는 "수정"에서 부모 변경으로 처리
+// ✅ 추가 요구사항 반영
+// 1) 생성경로(path) 표시 유지
+// 2) slug(영문명)은 생성 후 변경 불가 → 변경 필요 시 삭제 후 재생성
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -50,8 +48,8 @@ import { CSS } from "@dnd-kit/utilities";
 type MenuDoc = {
   id: string;
   name: string;
-  slug: string;
-  path: string;
+  slug: string; // ✅ 생성 후 변경 불가
+  path: string; // ✅ /contents/{slug}
   group: string;
   order: number;
   isActive: boolean;
@@ -59,21 +57,13 @@ type MenuDoc = {
   parentId: string | null; // ✅ 트리 구조
 };
 
-// ✅ rules에 match /menus 가 있으므로 그대로 사용
 const COL = "menus";
-
-// ✅ slug 규칙: 소문자 영문/숫자/_ 만 가능
 const SLUG_REGEX = /^[a-z0-9_]+$/;
 
-// ✅ slug로 path 자동 생성
 const buildPath = (slug: string) => `/contents/${slug}`;
-
-// ✅ slug 정규화: 공백 제거 + 소문자 변환
 const normalizeSlug = (raw: string) => raw.replace(/\s+/g, "").toLowerCase();
 
-// ✅ order 재계산(같은 parent 내)
 const resequence = (ids: string[]) => {
-  // ✅ 10,20,30.. 형태로 저장하면 향후 삽입에도 유리합니다.
   const map = new Map<string, number>();
   ids.forEach((id, idx) => map.set(id, (idx + 1) * 10));
   return map;
@@ -82,7 +72,6 @@ const resequence = (ids: string[]) => {
 export default function MenuManagePage() {
   const { user, loading, initError } = useAuth();
 
-  // ✅ Firestore 인스턴스
   const db = useMemo(() => {
     try {
       return getFirebaseDb();
@@ -98,10 +87,8 @@ export default function MenuManagePage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  // ✅ 트리 펼침 상태(기본: 최상위만 펼침)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
-  // ✅ 추가 폼 (path 입력 제거)
   const [form, setForm] = useState<{
     name: string;
     slug: string;
@@ -115,14 +102,14 @@ export default function MenuManagePage() {
     group: "Workspace",
     isActive: true,
     adminOnly: false,
-    parentId: null, // ✅ 기본: 최상위 생성
+    parentId: null,
   });
 
   // ✅ 편집 모달
   const [editId, setEditId] = useState("");
   const [edit, setEdit] = useState<{
     name: string;
-    slug: string;
+    slug: string; // ✅ UI에서는 disabled로 표시만
     group: string;
     isActive: boolean;
     adminOnly: boolean;
@@ -136,10 +123,10 @@ export default function MenuManagePage() {
     parentId: null,
   });
 
-  /**
-   * ✅ 관리자 여부 확인
-   * - users/{uid}.role === 'admin' 기준 (rules와 동일)
-   */
+  // ✅ slug 변경 차단을 위한 원본 slug 저장
+  const [editOriginalSlug, setEditOriginalSlug] = useState("");
+
+  /** ✅ 관리자 확인: users/{uid}.role === 'admin' */
   useEffect(() => {
     const run = async () => {
       setErr("");
@@ -165,7 +152,7 @@ export default function MenuManagePage() {
     run();
   }, [user, db]);
 
-  /** ✅ 메뉴 로드(전체를 가져와 클라이언트에서 트리 구성) */
+  /** ✅ 메뉴 로드 */
   const loadMenus = async () => {
     try {
       setErr("");
@@ -200,8 +187,6 @@ export default function MenuManagePage() {
 
       setMenus(rows);
 
-      // ✅ 기본 확장 상태: 최상위의 첫 로드 시에는 전부 펼침(원하시면 변경 가능)
-      // - 이미 expanded가 있으면 유지
       setExpanded((prev) => {
         if (Object.keys(prev).length > 0) return prev;
         const next: Record<string, boolean> = {};
@@ -222,7 +207,7 @@ export default function MenuManagePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, initError]);
 
-  /** ✅ children 맵 구성 */
+  /** ✅ parent -> children */
   const childrenByParent = useMemo(() => {
     const map = new Map<string | null, MenuDoc[]>();
     menus.forEach((m) => {
@@ -230,13 +215,11 @@ export default function MenuManagePage() {
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(m);
     });
-
-    // ✅ parent별 order 정렬
     map.forEach((arr) => arr.sort((a, b) => a.order - b.order));
     return map;
   }, [menus]);
 
-  /** ✅ 트리 평탄화(보이는 항목만) */
+  /** ✅ 보이는 트리 목록(flat) */
   const flatVisible = useMemo(() => {
     const out: Array<MenuDoc & { depth: number; hasChildren: boolean }> = [];
 
@@ -247,9 +230,7 @@ export default function MenuManagePage() {
         out.push({ ...node, depth, hasChildren });
 
         const isOpen = expanded[node.id] ?? false;
-        if (hasChildren && isOpen) {
-          walk(node.id, depth + 1);
-        }
+        if (hasChildren && isOpen) walk(node.id, depth + 1);
       }
     };
 
@@ -257,21 +238,19 @@ export default function MenuManagePage() {
     return out;
   }, [childrenByParent, expanded]);
 
-  /** ✅ 현재 parentId별 “보이는 형제” id 리스트 */
+  /** ✅ parentId 별 보이는 형제 id */
   const siblingIdsByParentVisible = useMemo(() => {
     const map = new Map<string | null, string[]>();
-
     flatVisible.forEach((m) => {
       const key = m.parentId ?? null;
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(m.id);
     });
-
     return map;
   }, [flatVisible]);
 
-  /** ✅ 입력값 검증 */
-  const validateMenu = (m: { name: string; slug: string }) => {
+  /** ✅ 검증 */
+  const validateMenuCreate = (m: { name: string; slug: string }) => {
     if (!m.name.trim()) return "메뉴명을 입력해주세요.";
     if (!m.slug.trim()) return "폴더명(영문)을 입력해주세요.";
     if (!SLUG_REGEX.test(m.slug)) {
@@ -280,7 +259,7 @@ export default function MenuManagePage() {
     return "";
   };
 
-  /** ✅ parentId 내에서 마지막 order 계산(새 메뉴 추가 시) */
+  /** ✅ 새 메뉴 order */
   const nextOrderForParent = (parentId: string | null) => {
     const siblings = menus.filter((m) => (m.parentId ?? null) === (parentId ?? null));
     if (siblings.length === 0) return 10;
@@ -288,7 +267,7 @@ export default function MenuManagePage() {
     return maxOrder + 10;
   };
 
-  /** ✅ 메뉴 추가(관리자만) */
+  /** ✅ 추가 */
   const addMenu = async () => {
     try {
       setErr("");
@@ -299,7 +278,7 @@ export default function MenuManagePage() {
         name: form.name.trim(),
         slug: normalizeSlug(form.slug),
       };
-      const msg = validateMenu(normalized);
+      const msg = validateMenuCreate(normalized);
       if (msg) return setErr(msg);
 
       const path = buildPath(normalized.slug);
@@ -309,7 +288,7 @@ export default function MenuManagePage() {
       await addDoc(collection(db, COL), {
         name: normalized.name,
         slug: normalized.slug,
-        path,
+        path, // ✅ 표시 유지 + 저장도 유지
         group: form.group,
         isActive: form.isActive,
         adminOnly: form.adminOnly,
@@ -318,12 +297,8 @@ export default function MenuManagePage() {
         updatedAt: serverTimestamp(),
       });
 
-      // ✅ 새로 만든 parent는 자동으로 펼치기
-      if (form.parentId) {
-        setExpanded((p) => ({ ...p, [form.parentId!]: true }));
-      }
+      if (form.parentId) setExpanded((p) => ({ ...p, [form.parentId!]: true }));
 
-      // ✅ 폼 리셋(부모는 유지하면 편함)
       setForm((p) => ({ ...p, name: "", slug: "" }));
       await loadMenus();
     } catch (e: any) {
@@ -336,9 +311,10 @@ export default function MenuManagePage() {
   /** ✅ 편집 시작 */
   const startEdit = (m: MenuDoc) => {
     setEditId(m.id);
+    setEditOriginalSlug(m.slug); // ✅ 원본 slug 저장
     setEdit({
       name: m.name,
-      slug: m.slug,
+      slug: m.slug, // ✅ 표시용(변경 금지)
       group: m.group,
       isActive: m.isActive,
       adminOnly: m.adminOnly,
@@ -346,7 +322,7 @@ export default function MenuManagePage() {
     });
   };
 
-  /** ✅ 편집 저장(관리자만) */
+  /** ✅ 편집 저장 */
   const saveEdit = async () => {
     try {
       setErr("");
@@ -354,31 +330,33 @@ export default function MenuManagePage() {
       if (!db) return;
       if (!editId) return;
 
-      const normalized = {
-        name: edit.name.trim(),
-        slug: normalizeSlug(edit.slug),
-      };
-      const msg = validateMenu(normalized);
-      if (msg) return setErr(msg);
+      // ✅ slug 변경 불가 정책
+      // - 혹시 상태값이 바뀌어도(개발자도구 등) 서버 업데이트는 막음
+      const normalizedSlug = normalizeSlug(edit.slug);
+      if (normalizedSlug !== editOriginalSlug) {
+        return setErr("폴더명(영문)은 변경할 수 없습니다. 변경하려면 삭제 후 새로 생성해주세요.");
+      }
+
+      if (!edit.name.trim()) return setErr("메뉴명을 입력해주세요.");
 
       // ✅ 자기 자신을 부모로 지정 금지
       if (edit.parentId === editId) {
         return setErr("부모 메뉴는 자기 자신이 될 수 없습니다.");
       }
 
-      const path = buildPath(normalized.slug);
+      // ✅ path는 slug 기반으로 유지(동일 slug이므로 동일)
+      const path = buildPath(editOriginalSlug);
 
       setBusy(true);
 
-      // ✅ 부모가 바뀌면 order를 새 parent의 맨 뒤로 붙임(간단/안전)
       const current = menus.find((m) => m.id === editId);
       const parentChanged = (current?.parentId ?? null) !== (edit.parentId ?? null);
       const nextOrder = parentChanged ? nextOrderForParent(edit.parentId) : (current?.order ?? 10);
 
       await updateDoc(doc(db, COL, editId), {
-        name: normalized.name,
-        slug: normalized.slug,
-        path,
+        name: edit.name.trim(),
+        slug: editOriginalSlug, // ✅ 강제 유지
+        path, // ✅ 유지
         group: edit.group,
         isActive: edit.isActive,
         adminOnly: edit.adminOnly,
@@ -387,12 +365,10 @@ export default function MenuManagePage() {
         updatedAt: serverTimestamp(),
       });
 
-      // ✅ 새 부모를 펼치기
-      if (edit.parentId) {
-        setExpanded((p) => ({ ...p, [edit.parentId!]: true }));
-      }
+      if (edit.parentId) setExpanded((p) => ({ ...p, [edit.parentId!]: true }));
 
       setEditId("");
+      setEditOriginalSlug("");
       await loadMenus();
     } catch (e: any) {
       setErr(e?.message ?? "메뉴 수정에 실패했습니다.");
@@ -401,14 +377,13 @@ export default function MenuManagePage() {
     }
   };
 
-  /** ✅ 메뉴 삭제(관리자만) */
+  /** ✅ 삭제 */
   const removeMenu = async (id: string) => {
     try {
       setErr("");
       if (!isAdmin) return setErr("관리자만 메뉴를 삭제할 수 있습니다.");
       if (!db) return;
 
-      // ✅ 자식이 있으면 삭제 금지(데이터 안전)
       const hasChildren = menus.some((m) => m.parentId === id);
       if (hasChildren) return setErr("하위 메뉴가 존재합니다. 하위 메뉴를 먼저 삭제해주세요.");
 
@@ -424,22 +399,15 @@ export default function MenuManagePage() {
 
   /** ✅ 드래그 센서 */
   const sensors = useSensors(
-    useSensor(PointerSensor, {
-      // ✅ 너무 민감하면 오작동할 수 있어 약간의 거리 설정
-      activationConstraint: { distance: 6 },
-    }),
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor)
   );
 
-  /**
-   * ✅ 드래그 종료 처리
-   * - 같은 parentId(같은 레벨)에서만 reorder
-   * - reorder 후 해당 parent의 형제 order를 재계산하여 Firestore 업데이트
-   */
+  /** ✅ 드래그 종료: 같은 레벨 내 reorder */
   const onDragEnd = async (event: DragEndEvent) => {
     try {
       setErr("");
-      if (!isAdmin) return; // ✅ 관리자만 reorder
+      if (!isAdmin) return;
       if (!db) return;
 
       const { active, over } = event;
@@ -453,11 +421,10 @@ export default function MenuManagePage() {
       const overMenu = menus.find((m) => m.id === overId);
       if (!activeMenu || !overMenu) return;
 
-      // ✅ 같은 parentId 안에서만 이동 허용
       const activeParent = activeMenu.parentId ?? null;
       const overParent = overMenu.parentId ?? null;
+
       if (activeParent !== overParent) {
-        // ✅ 다른 부모로 이동은 1차 구현에서 막음(원하시면 2차에서 지원)
         setErr("현재는 같은 레벨(같은 상위 메뉴) 내에서만 드래그 정렬이 가능합니다.");
         return;
       }
@@ -468,11 +435,8 @@ export default function MenuManagePage() {
       if (oldIndex < 0 || newIndex < 0) return;
 
       const moved = arrayMove(siblingsVisible, oldIndex, newIndex);
-
-      // ✅ order 재계산
       const orderMap = resequence(moved);
 
-      // ✅ 변경된 항목만 업데이트
       setBusy(true);
 
       const updates: Promise<void>[] = [];
@@ -483,7 +447,6 @@ export default function MenuManagePage() {
         if (typeof nextOrder !== "number") return m;
 
         if (m.order !== nextOrder) {
-          // ✅ Firestore update
           updates.push(
             updateDoc(doc(db, COL, m.id), {
               order: nextOrder,
@@ -504,45 +467,25 @@ export default function MenuManagePage() {
     }
   };
 
-  // ✅ write 가능 조건
   const canWrite = isAdmin && !checkingAdmin && !busy;
 
-  // ✅ 추가 폼에서 보여줄 자동 path
   const previewPath = buildPath(normalizeSlug(form.slug || "slug_here"));
+  const previewEditPath = buildPath(editOriginalSlug || normalizeSlug(edit.slug || "slug_here"));
 
-  // ✅ 편집 모달에서 보여줄 자동 path
-  const previewEditPath = buildPath(normalizeSlug(edit.slug || "slug_here"));
-
-  // ✅ 상위 메뉴 선택 옵션(자기 자신 제외)
   const parentOptions = useMemo(() => {
-    // ✅ 최상위(null) 포함
     const opts: Array<{ id: string | null; label: string }> = [{ id: null, label: "(최상위)" }];
-
     menus
       .slice()
       .sort((a, b) => a.order - b.order)
-      .forEach((m) => {
-        // ✅ 자기 자신은 부모 후보 제외 (편집 모달에서 처리)
-        opts.push({ id: m.id, label: m.name });
-      });
-
+      .forEach((m) => opts.push({ id: m.id, label: m.name }));
     return opts;
   }, [menus]);
 
-  /** ✅ 펼침/접힘 토글 */
-  const toggleExpand = (id: string) => {
-    setExpanded((p) => ({ ...p, [id]: !(p[id] ?? false) }));
-  };
+  const toggleExpand = (id: string) => setExpanded((p) => ({ ...p, [id]: !(p[id] ?? false) }));
 
-  /** ✅ 행별 "같은 레벨에 추가" / "하위메뉴 추가" 편의 기능 */
-  const setAddParentSameLevel = (m: MenuDoc) => {
-    // ✅ 같은 레벨 = 현재 메뉴의 parentId
-    setForm((p) => ({ ...p, parentId: m.parentId ?? null }));
-  };
+  const setAddParentSameLevel = (m: MenuDoc) => setForm((p) => ({ ...p, parentId: m.parentId ?? null }));
   const setAddParentChild = (m: MenuDoc) => {
-    // ✅ 하위로 = 현재 메뉴의 id
     setForm((p) => ({ ...p, parentId: m.id }));
-    // ✅ 하위 메뉴 추가 시 부모는 펼치기
     setExpanded((p) => ({ ...p, [m.id]: true }));
   };
 
@@ -609,6 +552,7 @@ export default function MenuManagePage() {
               </div>
             </label>
 
+            {/* ✅ 생성경로 표시 유지 */}
             <label className="text-sm">
               생성 경로(path)
               <input
@@ -631,9 +575,6 @@ export default function MenuManagePage() {
                   </option>
                 ))}
               </select>
-              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                목록에서 [하위메뉴] 버튼을 눌러도 자동으로 소속이 설정됩니다.
-              </div>
             </label>
 
             <label className="text-sm">
@@ -666,7 +607,7 @@ export default function MenuManagePage() {
           </div>
         </section>
 
-        {/* ✅ 메뉴 목록(트리 + 드래그) */}
+        {/* ✅ 메뉴 목록 */}
         <section className="mt-8 rounded-2xl border p-6">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-semibold">메뉴 목록</h2>
@@ -681,7 +622,6 @@ export default function MenuManagePage() {
 
           <div className="overflow-x-auto">
             <div className="min-w-[900px]">
-              {/* ✅ 헤더 */}
               <div className="grid grid-cols-[60px_1fr_220px_120px_120px_220px] gap-2 border-b pb-2 text-sm font-semibold">
                 <div> </div>
                 <div>메뉴</div>
@@ -691,7 +631,6 @@ export default function MenuManagePage() {
                 <div>actions</div>
               </div>
 
-              {/* ✅ DnD 컨테이너 */}
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
                 <SortableContext items={flatVisible.map((m) => m.id)} strategy={verticalListSortingStrategy}>
                   <div className="mt-2 space-y-1">
@@ -744,17 +683,19 @@ export default function MenuManagePage() {
                 </label>
 
                 <label className="text-sm">
-                  폴더명(영문)
+                  폴더명(영문) (변경 불가)
                   <input
                     value={edit.slug}
-                    onChange={(e) => setEdit((p) => ({ ...p, slug: normalizeSlug(e.target.value) }))}
-                    className="mt-1 w-full rounded-lg border px-3 py-2"
+                    // ✅ 입력은 막습니다 (변경 필요 시 삭제 후 생성)
+                    disabled
+                    className="mt-1 w-full rounded-lg border bg-gray-50 px-3 py-2 text-gray-700 disabled:opacity-100 dark:bg-gray-900 dark:text-gray-200"
                   />
                   <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    규칙: 소문자 영문/숫자/_ 만 가능 (공백/특수문자 불가)
+                    폴더명은 변경할 수 없습니다. 변경하려면 삭제 후 새로 생성해주세요.
                   </div>
                 </label>
 
+                {/* ✅ 생성경로 표시 유지 */}
                 <label className="text-sm">
                   생성 경로(path)
                   <input
@@ -772,7 +713,6 @@ export default function MenuManagePage() {
                     className="mt-1 w-full rounded-lg border px-3 py-2"
                   >
                     {parentOptions
-                      // ✅ 자기 자신은 부모 후보 제외
                       .filter((o) => o.id !== editId)
                       .map((o) => (
                         <option key={String(o.id ?? "null")} value={o.id ?? ""}>
@@ -846,10 +786,9 @@ function TreeRow(props: {
 }) {
   const { m, canWrite, onToggle, onEdit, onDelete, onAddSame, onAddChild } = props;
 
-  // ✅ Sortable hook
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: m.id,
-    disabled: !canWrite, // ✅ 관리자만 드래그
+    disabled: !canWrite,
   });
 
   const style: React.CSSProperties = {
@@ -858,7 +797,6 @@ function TreeRow(props: {
     opacity: isDragging ? 0.6 : 1,
   };
 
-  // ✅ 들여쓰기(px)
   const indent = m.depth * 20;
 
   return (
@@ -867,9 +805,7 @@ function TreeRow(props: {
       style={style}
       className="grid grid-cols-[60px_1fr_220px_120px_120px_220px] items-center gap-2 rounded-lg border px-2 py-2 text-sm"
     >
-      {/* ✅ 좌측: 펼침/드래그 핸들 */}
       <div className="flex items-center gap-2">
-        {/* 펼침/접힘 */}
         <button
           onClick={onToggle}
           disabled={!m.hasChildren}
@@ -879,7 +815,6 @@ function TreeRow(props: {
           {m.hasChildren ? "▾" : "·"}
         </button>
 
-        {/* 드래그 핸들 */}
         <button
           className="h-7 w-7 cursor-grab rounded border text-xs disabled:opacity-40"
           disabled={!canWrite}
@@ -891,7 +826,6 @@ function TreeRow(props: {
         </button>
       </div>
 
-      {/* ✅ 메뉴명/경로 */}
       <div className="flex items-center gap-3" style={{ paddingLeft: indent }}>
         <div className="min-w-0">
           <div className="truncate font-medium">{m.name}</div>
@@ -899,17 +833,11 @@ function TreeRow(props: {
         </div>
       </div>
 
-      {/* ✅ group */}
       <div className="truncate text-gray-600 dark:text-gray-300">{m.group || "-"}</div>
-
-      {/* ✅ active */}
       <div>{m.isActive ? "Y" : "N"}</div>
-
-      {/* ✅ adminOnly */}
       <div>{m.adminOnly ? "Y" : "N"}</div>
 
-      {/* ✅ actions */}
-      <div className="flex flex-wrap gap-2 justify-end">
+      <div className="flex flex-wrap justify-end gap-2">
         <button onClick={onAddSame} className="rounded-lg border px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-900">
           같은레벨 추가
         </button>
