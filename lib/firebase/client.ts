@@ -5,19 +5,16 @@
 
 import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
 import { getAuth, type Auth } from "firebase/auth";
-// ✅ Firestore 추가
 import { getFirestore, type Firestore } from "firebase/firestore";
 
 let _app: FirebaseApp | null = null;
 let _auth: Auth | null = null;
-// ✅ Firestore 싱글톤
 let _db: Firestore | null = null;
 
 /** Firebase App 싱글톤 반환 */
 export function getFirebaseApp(): FirebaseApp {
   if (_app) return _app;
 
-  // ✅ 환경변수 기반 설정 (Vercel에도 동일하게 등록 필요)
   const firebaseConfig = {
     apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
     authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
@@ -27,7 +24,6 @@ export function getFirebaseApp(): FirebaseApp {
     appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
   };
 
-  // ✅ 필수값 최소 체크 (누락 시 런타임에서 명확히 알 수 있게)
   const required = [
     firebaseConfig.apiKey,
     firebaseConfig.authDomain,
@@ -48,7 +44,6 @@ export function getFirebaseApp(): FirebaseApp {
 /** Firebase Auth 싱글톤 반환 */
 export function getFirebaseAuth(): Auth {
   if (_auth) return _auth;
-
   const app = getFirebaseApp();
   _auth = getAuth(app);
   return _auth;
@@ -57,7 +52,6 @@ export function getFirebaseAuth(): Auth {
 /** ✅ Firestore 싱글톤 반환 */
 export function getFirebaseDb(): Firestore {
   if (_db) return _db;
-
   const app = getFirebaseApp();
   _db = getFirestore(app);
   return _db;
