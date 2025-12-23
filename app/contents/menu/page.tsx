@@ -3,18 +3,9 @@
 /**
  * app/contents/menu/page.tsx
  *
- * ✅ 요구사항 반영
- * 1) 입력 폼에서 필수(*) 표시
- * 2) 메뉴는 "카테고리(페이지 없음)" 또는 "기능(페이지 있음)" 타입 지원
- * 3) 영문명(slug)은 "기능(페이지 있음)"일 때만 필수 (최하위/실제 기능 메뉴)
- * 4) 생성경로(path)는 계속 표시하되,
- *    - 카테고리면 "(경로 없음)" 표시
- *    - 기능이면 "/contents/{slug}" 표시
- * 5) slug 변경 불가:
- *    - 기능 메뉴(hasPage=true): 생성 후 slug 변경 불가(수정 모달 disabled)
- *    - 카테고리→기능 전환: 최초 1회 slug 입력 가능
- *    - 기능→카테고리 전환: 금지(삭제 후 재생성 안내)
- * 6) 트리(계층): parentId, 드래그정렬(같은 parentId 내에서만)
+ * ✅ 변경사항
+ * - (요구사항 2) 목록 Row의 "같은레벨 추가 / 하위메뉴" 버튼 제거
+ * - 계층 지정은 "상위 메뉴(소속)" select로만 처리
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -64,23 +55,20 @@ type MenuDoc = {
   parentId: string | null;
 
   // ✅ 타입
-  hasPage: boolean; // true=기능(페이지 있음), false=카테고리(페이지 없음)
+  hasPage: boolean; // true=기능(페이지), false=카테고리
 
   // ✅ 기능 메뉴에서만 사용
-  slug: string; // hasPage=true일 때 필수, 생성 후 변경 불가
-  path: string; // hasPage=true일 때 /contents/{slug}
+  slug: string;
+  path: string;
 };
 
 const COL = "menus";
-
-// ✅ slug 규칙: 소문자 영문/숫자/_ 만
 const SLUG_REGEX = /^[a-z0-9_]+$/;
 
 const buildPath = (slug: string) => `/contents/${slug}`;
 const normalizeSlug = (raw: string) => raw.replace(/\s+/g, "").toLowerCase();
 
 const resequence = (ids: string[]) => {
-  // ✅ 10,20,30.. 저장(추후 삽입/정렬에 유리)
   const map = new Map<string, number>();
   ids.forEach((id, idx) => map.set(id, (idx + 1) * 10));
   return map;
@@ -104,21 +92,19 @@ export default function MenuManagePage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  // ✅ 트리 펼침 상태
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
-  // ✅ 추가 폼
   const [form, setForm] = useState<{
     name: string;
     hasPage: boolean;
-    slug: string; // hasPage=true일 때만 사용
+    slug: string;
     group: string;
     isActive: boolean;
     adminOnly: boolean;
     parentId: string | null;
   }>({
     name: "",
-    hasPage: false, // ✅ 기본은 카테고리로 두는게 안전(원하시면 true로 변경 가능)
+    hasPage: false,
     slug: "",
     group: "Workspace",
     isActive: true,
@@ -126,7 +112,6 @@ export default function MenuManagePage() {
     parentId: null,
   });
 
-  // ✅ 편집 모달
   const [editId, setEditId] = useState("");
   const [edit, setEdit] = useState<{
     name: string;
@@ -146,13 +131,10 @@ export default function MenuManagePage() {
     parentId: null,
   });
 
-  // ✅ slug 변경 차단용 원본값
   const [editOriginalSlug, setEditOriginalSlug] = useState("");
   const [editOriginalHasPage, setEditOriginalHasPage] = useState(false);
 
-  /**
-   * ✅ 관리자 확인: users/{uid}.role === 'admin'
-   */
+  /** ✅ 관리자 확인: users/{uid}.role === 'admin' */
   useEffect(() => {
     const run = async () => {
       setErr("");
@@ -178,10 +160,7 @@ export default function MenuManagePage() {
     run();
   }, [user, db]);
 
-  /**
-   * ✅ 메뉴 로드
-   * - 기존 문서에 hasPage/slug/path/parentId가 없을 수도 있으므로 기본값 처리
-   */
+  /** ✅ 메뉴 로드 */
   const loadMenus = async () => {
     try {
       setErr("");
@@ -200,8 +179,7 @@ export default function MenuManagePage() {
 
         const hasPage = Boolean(v.hasPage ?? false);
         const slug = String(v.slug ?? "");
-        const path =
-          hasPage && slug ? String(v.path ?? buildPath(slug)) : String(v.path ?? "");
+        const path = hasPage && slug ? String(v.path ?? buildPath(slug)) : String(v.path ?? "");
 
         const parentIdRaw = v.parentId ?? null;
         const parentId = parentIdRaw === "" ? null : (parentIdRaw as string | null);
@@ -210,8 +188,8 @@ export default function MenuManagePage() {
           id: d.id,
           name: String(v.name ?? ""),
           hasPage,
-          slug: hasPage ? slug : "", // ✅ 카테고리는 slug 비움
-          path: hasPage ? path : "", // ✅ 카테고리는 path 비움
+          slug: hasPage ? slug : "",
+          path: hasPage ? path : "",
           group: String(v.group ?? ""),
           order: Number(v.order ?? 0),
           isActive: Boolean(v.isActive ?? true),
@@ -222,7 +200,6 @@ export default function MenuManagePage() {
 
       setMenus(rows);
 
-      // ✅ 초기 expanded 세팅(최상위 기본 펼침)
       setExpanded((prev) => {
         if (Object.keys(prev).length > 0) return prev;
         const next: Record<string, boolean> = {};
@@ -243,7 +220,6 @@ export default function MenuManagePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, initError]);
 
-  /** ✅ children map */
   const childrenByParent = useMemo(() => {
     const map = new Map<string | null, MenuDoc[]>();
     menus.forEach((m) => {
@@ -255,7 +231,6 @@ export default function MenuManagePage() {
     return map;
   }, [menus]);
 
-  /** ✅ 보여지는 트리(flat) */
   const flatVisible = useMemo(() => {
     const out: Array<MenuDoc & { depth: number; hasChildren: boolean }> = [];
 
@@ -274,7 +249,6 @@ export default function MenuManagePage() {
     return out;
   }, [childrenByParent, expanded]);
 
-  /** ✅ parentId 별 보이는 형제 id */
   const siblingIdsByParentVisible = useMemo(() => {
     const map = new Map<string | null, string[]>();
     flatVisible.forEach((m) => {
@@ -285,11 +259,8 @@ export default function MenuManagePage() {
     return map;
   }, [flatVisible]);
 
-  /** ✅ 입력 검증 */
-  const validateCreateOrEdit = (payload: { name: string; hasPage: boolean; slug: string }) => {
+  const validate = (payload: { name: string; hasPage: boolean; slug: string }) => {
     if (!payload.name.trim()) return "메뉴명을 입력해주세요.";
-
-    // ✅ 기능 메뉴일 때만 slug 필수
     if (payload.hasPage) {
       if (!payload.slug.trim()) return "기능(페이지 있음) 메뉴는 폴더명(영문)이 필수입니다.";
       if (!SLUG_REGEX.test(payload.slug)) {
@@ -299,7 +270,6 @@ export default function MenuManagePage() {
     return "";
   };
 
-  /** ✅ 새 메뉴 order 계산 */
   const nextOrderForParent = (parentId: string | null) => {
     const siblings = menus.filter((m) => (m.parentId ?? null) === (parentId ?? null));
     if (siblings.length === 0) return 10;
@@ -307,7 +277,6 @@ export default function MenuManagePage() {
     return maxOrder + 10;
   };
 
-  /** ✅ 메뉴 추가 */
   const addMenu = async () => {
     try {
       setErr("");
@@ -315,17 +284,15 @@ export default function MenuManagePage() {
       if (!db) return;
 
       const normalizedSlug = normalizeSlug(form.slug);
-      const msg = validateCreateOrEdit({ name: form.name, hasPage: form.hasPage, slug: normalizedSlug });
+      const msg = validate({ name: form.name, hasPage: form.hasPage, slug: normalizedSlug });
       if (msg) return setErr(msg);
 
       const order = nextOrderForParent(form.parentId);
 
-      // ✅ 카테고리면 slug/path 비움
       const finalSlug = form.hasPage ? normalizedSlug : "";
       const finalPath = form.hasPage ? buildPath(finalSlug) : "";
 
       setBusy(true);
-
       await addDoc(collection(db, COL), {
         name: form.name.trim(),
         hasPage: form.hasPage,
@@ -339,10 +306,6 @@ export default function MenuManagePage() {
         updatedAt: serverTimestamp(),
       });
 
-      // ✅ 하위로 추가했으면 부모 펼침
-      if (form.parentId) setExpanded((p) => ({ ...p, [form.parentId!]: true }));
-
-      // ✅ 폼 리셋(부모 유지)
       setForm((p) => ({ ...p, name: "", slug: "" }));
       await loadMenus();
     } catch (e: any) {
@@ -352,7 +315,6 @@ export default function MenuManagePage() {
     }
   };
 
-  /** ✅ 편집 시작 */
   const startEdit = (m: MenuDoc) => {
     setEditId(m.id);
     setEditOriginalSlug(m.slug || "");
@@ -369,7 +331,6 @@ export default function MenuManagePage() {
     });
   };
 
-  /** ✅ 편집 저장 */
   const saveEdit = async () => {
     try {
       setErr("");
@@ -377,51 +338,34 @@ export default function MenuManagePage() {
       if (!db) return;
       if (!editId) return;
 
-      // ✅ 기능 → 카테고리 전환 금지(링크/운영 안정)
+      // ✅ 기능 → 카테고리 전환 금지
       if (editOriginalHasPage === true && edit.hasPage === false) {
         return setErr("기능(페이지 있음) 메뉴를 카테고리로 변경할 수 없습니다. 삭제 후 새로 생성해주세요.");
       }
 
-      // ✅ slug 변경 불가 정책
-      // - 원래 기능 메뉴였으면 slug 변경 금지
-      // - 원래 카테고리였고 기능으로 전환하는 경우: 최초 1회 slug 입력 가능
       const normalizedSlug = normalizeSlug(edit.slug);
 
-      if (editOriginalHasPage === true) {
-        // ✅ 기능 메뉴는 slug 불변
-        if (normalizedSlug !== editOriginalSlug) {
-          return setErr("폴더명(영문)은 변경할 수 없습니다. 변경하려면 삭제 후 새로 생성해주세요.");
-        }
+      // ✅ 기존 기능 메뉴는 slug 불변
+      if (editOriginalHasPage === true && normalizedSlug !== editOriginalSlug) {
+        return setErr("폴더명(영문)은 변경할 수 없습니다. 변경하려면 삭제 후 새로 생성해주세요.");
       }
 
-      // ✅ 기본 검증(기능이면 slug 필수)
-      const msg = validateCreateOrEdit({ name: edit.name, hasPage: edit.hasPage, slug: normalizedSlug });
+      const msg = validate({ name: edit.name, hasPage: edit.hasPage, slug: normalizedSlug });
       if (msg) return setErr(msg);
 
-      // ✅ 자기 자신을 부모로 지정 금지
       if (edit.parentId === editId) return setErr("부모 메뉴는 자기 자신이 될 수 없습니다.");
 
-      // ✅ 최종 slug/path 결정
-      // - 카테고리 유지: slug/path 비움
-      // - 기능 유지: 기존 slug 유지
-      // - 카테고리→기능 전환: 이번에 입력한 slug를 최초 1회 저장(이후 불변)
       const finalHasPage = Boolean(edit.hasPage);
-
       let finalSlug = "";
       let finalPath = "";
 
       if (finalHasPage) {
-        finalSlug = editOriginalHasPage ? editOriginalSlug : normalizedSlug;
+        finalSlug = editOriginalHasPage ? editOriginalSlug : normalizedSlug; // ✅ 카테고리→기능 전환 시 최초 설정
         finalPath = buildPath(finalSlug);
-      } else {
-        // ✅ 여기로 오면 editOriginalHasPage가 false인 케이스뿐(위에서 기능→카테고리 막음)
-        finalSlug = "";
-        finalPath = "";
       }
 
       setBusy(true);
 
-      // ✅ 부모가 변경되면 새 parent의 맨 뒤로 붙임
       const current = menus.find((m) => m.id === editId);
       const parentChanged = (current?.parentId ?? null) !== (edit.parentId ?? null);
       const nextOrder = parentChanged ? nextOrderForParent(edit.parentId) : (current?.order ?? 10);
@@ -439,9 +383,6 @@ export default function MenuManagePage() {
         updatedAt: serverTimestamp(),
       });
 
-      // ✅ 새 부모 펼침
-      if (edit.parentId) setExpanded((p) => ({ ...p, [edit.parentId!]: true }));
-
       setEditId("");
       setEditOriginalSlug("");
       setEditOriginalHasPage(false);
@@ -453,14 +394,12 @@ export default function MenuManagePage() {
     }
   };
 
-  /** ✅ 삭제 */
   const removeMenu = async (id: string) => {
     try {
       setErr("");
       if (!isAdmin) return setErr("관리자만 메뉴를 삭제할 수 있습니다.");
       if (!db) return;
 
-      // ✅ 자식 있으면 삭제 금지(안전)
       const hasChildren = menus.some((m) => m.parentId === id);
       if (hasChildren) return setErr("하위 메뉴가 존재합니다. 하위 메뉴를 먼저 삭제해주세요.");
 
@@ -474,13 +413,11 @@ export default function MenuManagePage() {
     }
   };
 
-  /** ✅ 드래그 센서 */
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor)
   );
 
-  /** ✅ 드래그 종료: 같은 parentId 내 reorder */
   const onDragEnd = async (event: DragEndEvent) => {
     try {
       setErr("");
@@ -543,16 +480,12 @@ export default function MenuManagePage() {
 
   const canWrite = isAdmin && !checkingAdmin && !busy;
 
-  // ✅ 생성경로 표시(유지)
   const previewFormSlug = normalizeSlug(form.slug || "slug_here");
-  const previewPath =
-    form.hasPage ? buildPath(previewFormSlug) : "(카테고리: 경로 없음)";
+  const previewPath = form.hasPage ? buildPath(previewFormSlug) : "(카테고리: 경로 없음)";
 
-  // ✅ 편집 경로 표시(유지)
   const previewEditSlug = editOriginalHasPage ? editOriginalSlug : normalizeSlug(edit.slug || "slug_here");
   const previewEditPath = edit.hasPage ? buildPath(previewEditSlug) : "(카테고리: 경로 없음)";
 
-  // ✅ 부모 옵션
   const parentOptions = useMemo(() => {
     const opts: Array<{ id: string | null; label: string }> = [{ id: null, label: "(최상위)" }];
     menus
@@ -564,20 +497,10 @@ export default function MenuManagePage() {
 
   const toggleExpand = (id: string) => setExpanded((p) => ({ ...p, [id]: !(p[id] ?? false) }));
 
-  // ✅ 행에서 버튼으로 부모 지정
-  const setAddParentSameLevel = (m: MenuDoc) => setForm((p) => ({ ...p, parentId: m.parentId ?? null }));
-  const setAddParentChild = (m: MenuDoc) => {
-    setForm((p) => ({ ...p, parentId: m.id }));
-    setExpanded((p) => ({ ...p, [m.id]: true }));
-  };
-
   return (
     <main className="px-6 pb-10">
       <div className="mx-auto max-w-6xl">
         <h1 className="text-2xl font-bold">메뉴 관리</h1>
-        <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-          카테고리(페이지 없음) / 기능(페이지 있음) 메뉴를 관리합니다. 기능 메뉴만 /contents/{`{slug}`} 경로를 가집니다.
-        </p>
 
         <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">
           {loading ? "로그인 상태 확인 중..." : user ? `로그인: ${user.email ?? ""}` : "비로그인"}
@@ -604,12 +527,6 @@ export default function MenuManagePage() {
             </button>
           </div>
 
-          {!isAdmin && (
-            <div className="mb-4 text-sm text-gray-600 dark:text-gray-300">
-              관리자만 추가/수정/삭제/정렬이 가능합니다.
-            </div>
-          )}
-
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <label className="text-sm">
               메뉴명<span className="text-red-500"> *</span>
@@ -617,7 +534,6 @@ export default function MenuManagePage() {
                 value={form.name}
                 onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
                 className="mt-1 w-full rounded-lg border px-3 py-2"
-                placeholder="예: Reports"
               />
             </label>
 
@@ -627,12 +543,7 @@ export default function MenuManagePage() {
                 value={form.hasPage ? "page" : "category"}
                 onChange={(e) => {
                   const nextHasPage = e.target.value === "page";
-                  setForm((p) => ({
-                    ...p,
-                    hasPage: nextHasPage,
-                    // ✅ 카테고리로 바꾸면 slug 비우기(혼란 방지)
-                    slug: nextHasPage ? p.slug : "",
-                  }));
+                  setForm((p) => ({ ...p, hasPage: nextHasPage, slug: nextHasPage ? p.slug : "" }));
                 }}
                 className="mt-1 w-full rounded-lg border px-3 py-2"
               >
@@ -648,14 +559,9 @@ export default function MenuManagePage() {
                 onChange={(e) => setForm((p) => ({ ...p, slug: normalizeSlug(e.target.value) }))}
                 disabled={!form.hasPage}
                 className="mt-1 w-full rounded-lg border px-3 py-2 disabled:bg-gray-50 dark:disabled:bg-gray-900"
-                placeholder="예: reports (기능 메뉴일 때만)"
               />
-              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                규칙: 소문자 영문/숫자/_ 만 가능 (공백/특수문자 불가)
-              </div>
             </label>
 
-            {/* ✅ 생성경로 표시 유지 */}
             <label className="text-sm">
               생성 경로(path)
               <input
@@ -686,7 +592,6 @@ export default function MenuManagePage() {
                 value={form.group}
                 onChange={(e) => setForm((p) => ({ ...p, group: e.target.value }))}
                 className="mt-1 w-full rounded-lg border px-3 py-2"
-                placeholder="예: Workspace / Tools / Admin"
               />
             </label>
 
@@ -725,7 +630,7 @@ export default function MenuManagePage() {
 
           <div className="overflow-x-auto">
             <div className="min-w-[980px]">
-              <div className="grid grid-cols-[60px_1fr_160px_120px_120px_120px_220px] gap-2 border-b pb-2 text-sm font-semibold">
+              <div className="grid grid-cols-[60px_1fr_160px_120px_120px_120px_180px] gap-2 border-b pb-2 text-sm font-semibold">
                 <div> </div>
                 <div>메뉴</div>
                 <div className="text-gray-600 dark:text-gray-300">type</div>
@@ -746,22 +651,12 @@ export default function MenuManagePage() {
                         onToggle={() => toggleExpand(m.id)}
                         onEdit={() => startEdit(m)}
                         onDelete={() => removeMenu(m.id)}
-                        onAddSame={() => setAddParentSameLevel(m)}
-                        onAddChild={() => setAddParentChild(m)}
                       />
                     ))}
-
-                    {flatVisible.length === 0 && (
-                      <div className="py-4 text-sm text-gray-600 dark:text-gray-300">등록된 메뉴가 없습니다.</div>
-                    )}
                   </div>
                 </SortableContext>
               </DndContext>
             </div>
-          </div>
-
-          <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-            드래그 정렬은 같은 레벨(같은 상위 메뉴) 내에서만 가능합니다.
           </div>
         </section>
 
@@ -792,44 +687,23 @@ export default function MenuManagePage() {
                     value={edit.hasPage ? "page" : "category"}
                     onChange={(e) => {
                       const nextHasPage = e.target.value === "page";
-                      setEdit((p) => ({
-                        ...p,
-                        hasPage: nextHasPage,
-                        // ✅ 카테고리로 바꾸면 slug 비움(단, 기능→카테고리는 저장에서 금지)
-                        slug: nextHasPage ? p.slug : "",
-                      }));
+                      setEdit((p) => ({ ...p, hasPage: nextHasPage, slug: nextHasPage ? p.slug : "" }));
                     }}
                     className="mt-1 w-full rounded-lg border px-3 py-2"
                   >
                     <option value="category">카테고리(페이지 없음)</option>
                     <option value="page">기능(페이지 있음)</option>
                   </select>
-                  {editOriginalHasPage && !edit.hasPage && (
-                    <div className="mt-1 text-xs text-red-600 dark:text-red-300">
-                      기능 → 카테고리 변경은 저장 시 차단됩니다(삭제 후 재생성).
-                    </div>
-                  )}
                 </label>
 
                 <label className="text-sm">
-                  폴더명(영문)
-                  {edit.hasPage ? <span className="text-red-500"> *</span> : null}
+                  폴더명(영문){edit.hasPage ? <span className="text-red-500"> *</span> : null}
                   <input
                     value={edit.slug}
                     onChange={(e) => setEdit((p) => ({ ...p, slug: normalizeSlug(e.target.value) }))}
-                    // ✅ 기능 메뉴였던 경우: slug 변경 금지
-                    // ✅ 카테고리였던 경우 + 기능으로 전환: slug 입력 가능(최초 1회)
                     disabled={editOriginalHasPage || !edit.hasPage}
                     className="mt-1 w-full rounded-lg border px-3 py-2 disabled:bg-gray-50 dark:disabled:bg-gray-900"
-                    placeholder="예: reports"
                   />
-                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    {editOriginalHasPage
-                      ? "폴더명은 변경할 수 없습니다. 변경하려면 삭제 후 새로 생성해주세요."
-                      : edit.hasPage
-                      ? "카테고리를 기능 메뉴로 전환하는 경우, 폴더명은 최초 1회 설정 후 변경 불가입니다."
-                      : "카테고리 메뉴는 폴더명이 필요 없습니다."}
-                  </div>
                 </label>
 
                 <label className="text-sm">
@@ -898,10 +772,6 @@ export default function MenuManagePage() {
                   저장
                 </button>
               </div>
-
-              {!isAdmin && (
-                <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">관리자만 저장할 수 있습니다.</div>
-              )}
             </div>
           </div>
         )}
@@ -910,17 +780,15 @@ export default function MenuManagePage() {
   );
 }
 
-/** ✅ 트리 Row(드래그 가능) */
+/** ✅ 트리 Row(드래그 가능) - 버튼 최소화(수정/삭제만) */
 function TreeRow(props: {
   m: MenuDoc & { depth: number; hasChildren: boolean };
   canWrite: boolean;
   onToggle: () => void;
   onEdit: () => void;
   onDelete: () => void;
-  onAddSame: () => void;
-  onAddChild: () => void;
 }) {
-  const { m, canWrite, onToggle, onEdit, onDelete, onAddSame, onAddChild } = props;
+  const { m, canWrite, onToggle, onEdit, onDelete } = props;
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: m.id,
@@ -934,7 +802,6 @@ function TreeRow(props: {
   };
 
   const indent = m.depth * 20;
-
   const typeLabel = m.hasPage ? "기능(페이지)" : "카테고리";
   const pathLabel = m.hasPage ? m.path : "(경로 없음)";
 
@@ -942,7 +809,7 @@ function TreeRow(props: {
     <div
       ref={setNodeRef}
       style={style}
-      className="grid grid-cols-[60px_1fr_160px_120px_120px_120px_220px] items-center gap-2 rounded-lg border px-2 py-2 text-sm"
+      className="grid grid-cols-[60px_1fr_160px_120px_120px_120px_180px] items-center gap-2 rounded-lg border px-2 py-2 text-sm"
     >
       <div className="flex items-center gap-2">
         <button
@@ -977,13 +844,7 @@ function TreeRow(props: {
       <div>{m.isActive ? "Y" : "N"}</div>
       <div>{m.adminOnly ? "Y" : "N"}</div>
 
-      <div className="flex flex-wrap justify-end gap-2">
-        <button onClick={onAddSame} className="rounded-lg border px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-900">
-          같은레벨 추가
-        </button>
-        <button onClick={onAddChild} className="rounded-lg border px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-900">
-          하위메뉴
-        </button>
+      <div className="flex justify-end gap-2">
         <button onClick={onEdit} className="rounded-lg border px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-900">
           수정
         </button>
