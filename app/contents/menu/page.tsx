@@ -2,10 +2,13 @@
 
 // app/contents/menu/page.tsx
 // - ProjNow 메뉴관리 페이지
-// - Firestore(system_menus) 기반 CRUD
-// - 비로그인/일반유저도 목록 조회는 가능(원칙상 사용 중에도 로그인 가능)
-// - 추가/수정/삭제는 관리자(admin claim)만 가능
+// - Firestore(menus) 기반 CRUD
+// - 비로그인/일반유저도 목록 조회는 가능
+// - 추가/수정/삭제는 관리자(adminLike)만 가능
 // - 리다이렉트 없음(요구사항 준수)
+// ✅ 변경점
+//   1) 관리자 판정 기준을 "custom claim" → "Firestore users/{uid}.role === 'admin'" 로 통일
+//   2) 컬렉션명을 rules에 정의된 /menus 와 맞추기 위해 system_menus → menus 로 변경
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -13,16 +16,16 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc, // ✅ 추가: users/{uid} role 조회용
   getDocs,
   orderBy,
   query,
   serverTimestamp,
   updateDoc,
 } from "firebase/firestore";
-import { getIdTokenResult } from "firebase/auth";
 
 import { useAuth } from "@/lib/auth/useAuth";
-import { getFirebaseAuth, getFirebaseDb } from "@/lib/firebase/client";
+import { getFirebaseDb } from "@/lib/firebase/client";
 
 type MenuDoc = {
   id: string;
@@ -34,20 +37,13 @@ type MenuDoc = {
   adminOnly: boolean;
 };
 
-// ✅ 컬렉션명(원하시면 변경 가능)
-const COL = "system_menus";
+// ✅ 컬렉션명: rules에 match /menus 가 존재하므로 여기에 맞춥니다.
+const COL = "menus";
 
 export default function MenuManagePage() {
   const { user, loading, initError } = useAuth();
 
-  const auth = useMemo(() => {
-    try {
-      return getFirebaseAuth();
-    } catch {
-      return null;
-    }
-  }, []);
-
+  // ✅ Firestore 인스턴스
   const db = useMemo(() => {
     try {
       return getFirebaseDb();
@@ -84,19 +80,31 @@ export default function MenuManagePage() {
     adminOnly: false,
   });
 
-  /** ✅ 관리자 여부 확인: custom claim admin === true */
+  /**
+   * ✅ 관리자 여부 확인(핵심 수정)
+   * - 기존: custom claim(admin)만 확인 → users.role이 admin이어도 일반 사용자로 표기되는 문제
+   * - 변경: Firestore users/{uid}.role === 'admin' 를 기준으로 판정
+   * - 이유: Firestore rules의 adminLike 판정( users.role / whitelist / claim )과 기준을 일치시키기 위함
+   */
   useEffect(() => {
     const run = async () => {
       setErr("");
-      if (!user || !auth) {
+
+      // ✅ 비로그인이거나 DB 초기화 전이면 admin 아님
+      if (!user || !db) {
         setIsAdmin(false);
         return;
       }
 
       try {
         setCheckingAdmin(true);
-        const token = await getIdTokenResult(user, true);
-        setIsAdmin(token?.claims?.admin === true);
+
+        // ✅ users/{uid} 문서에서 role 확인
+        // - 문서가 없으면 admin으로 보지 않음
+        const snap = await getDoc(doc(db, "users", user.uid));
+        const role = snap.exists() ? (snap.data() as any)?.role : null;
+
+        setIsAdmin(role === "admin");
       } catch (e: any) {
         setIsAdmin(false);
         setErr(e?.message ?? "관리자 권한 확인 중 오류가 발생했습니다.");
@@ -106,18 +114,21 @@ export default function MenuManagePage() {
     };
 
     run();
-  }, [user, auth]);
+  }, [user, db]);
 
   /** ✅ 메뉴 로드 */
   const loadMenus = async () => {
     try {
       setErr("");
+
       if (!db) {
         setErr("Firestore 초기화에 실패했습니다. Firebase 환경변수를 확인해주세요.");
         return;
       }
 
       setBusy(true);
+
+      // ✅ menus 컬렉션을 order asc로 로드
       const q = query(collection(db, COL), orderBy("order", "asc"));
       const snap = await getDocs(q);
 
@@ -136,6 +147,10 @@ export default function MenuManagePage() {
 
       setMenus(rows);
     } catch (e: any) {
+      // ✅ 여기서 "Missing or insufficient permissions"가 뜬다면
+      // - 현재 rules에서 /menus read 허용 여부
+      // - 실제 앱이 같은 Firebase 프로젝트를 보고 있는지
+      // 를 점검해야 합니다.
       setErr(e?.message ?? "메뉴 목록 로드에 실패했습니다.");
     } finally {
       setBusy(false);
@@ -144,6 +159,7 @@ export default function MenuManagePage() {
 
   useEffect(() => {
     // ✅ 초기화 완료 후 로드
+    // - 비로그인도 목록 조회 가능 요구사항이므로, auth 로딩이 끝나면 로드 시도
     if (!loading && !initError) {
       loadMenus();
     }
@@ -244,6 +260,7 @@ export default function MenuManagePage() {
     }
   };
 
+  // ✅ write 가능 조건: 관리자 + 권한확인 완료 + 현재 작업중 아님
   const canWrite = isAdmin && !checkingAdmin && !busy;
 
   return (
@@ -321,9 +338,7 @@ export default function MenuManagePage() {
               <input
                 type="number"
                 value={form.order}
-                onChange={(e) =>
-                  setForm((p) => ({ ...p, order: Number(e.target.value) }))
-                }
+                onChange={(e) => setForm((p) => ({ ...p, order: Number(e.target.value) }))}
                 className="mt-1 w-full rounded-lg border px-3 py-2"
               />
             </label>
@@ -341,9 +356,7 @@ export default function MenuManagePage() {
               <input
                 type="checkbox"
                 checked={form.adminOnly}
-                onChange={(e) =>
-                  setForm((p) => ({ ...p, adminOnly: e.target.checked }))
-                }
+                onChange={(e) => setForm((p) => ({ ...p, adminOnly: e.target.checked }))}
               />
               관리자 전용(adminOnly)
             </label>
