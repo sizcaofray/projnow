@@ -1,14 +1,11 @@
 "use client";
 
 // app/contents/menu/page.tsx
-// - ProjNow 메뉴관리 페이지
-// - Firestore(menus) 기반 CRUD
-// - 비로그인/일반유저도 목록 조회는 가능
-// - 추가/수정/삭제는 관리자(adminLike)만 가능
-// - 리다이렉트 없음(요구사항 준수)
-// ✅ 변경점
-//   1) 관리자 판정 기준을 "custom claim" → "Firestore users/{uid}.role === 'admin'" 로 통일
-//   2) 컬렉션명을 rules에 정의된 /menus 와 맞추기 위해 system_menus → menus 로 변경
+// ✅ 목표
+// - 관리자는 메뉴명 + 폴더명(slug)만 등록/수정/삭제
+// - path는 자동으로 /contents/{slug} 생성 (사용자 입력 제거)
+// - 실제 페이지 파일(app/contents/{slug}/page.tsx)은 관리자가 직접 생성/개발
+// - 권한 판단은 Firestore users/{uid}.role === 'admin' 기준
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -16,7 +13,7 @@ import {
   collection,
   deleteDoc,
   doc,
-  getDoc, // ✅ 추가: users/{uid} role 조회용
+  getDoc,
   getDocs,
   orderBy,
   query,
@@ -29,16 +26,23 @@ import { getFirebaseDb } from "@/lib/firebase/client";
 
 type MenuDoc = {
   id: string;
-  name: string;
-  path: string;
+  name: string; // 메뉴명(한글 가능)
+  slug: string; // 폴더명(영문/숫자/_)
+  path: string; // 자동 생성: /contents/{slug}
   group: string;
   order: number;
   isActive: boolean;
   adminOnly: boolean;
 };
 
-// ✅ 컬렉션명: rules에 match /menus 가 존재하므로 여기에 맞춥니다.
+// ✅ rules에 match /menus 가 있으므로 그대로 사용
 const COL = "menus";
+
+// ✅ 폴더명 규칙: 소문자 영문/숫자/언더스코어만
+const SLUG_REGEX = /^[a-z0-9_]+$/;
+
+// ✅ slug로 path 자동 생성
+const buildPath = (slug: string) => `/contents/${slug}`;
 
 export default function MenuManagePage() {
   const { user, loading, initError } = useAuth();
@@ -59,21 +63,21 @@ export default function MenuManagePage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  // ✅ 추가 폼 상태
-  const [form, setForm] = useState<Omit<MenuDoc, "id">>({
+  // ✅ 추가 폼 상태 (path는 입력하지 않음)
+  const [form, setForm] = useState<Omit<MenuDoc, "id" | "path">>({
     name: "",
-    path: "",
+    slug: "",
     group: "Workspace",
     order: 100,
     isActive: true,
     adminOnly: false,
   });
 
-  // ✅ 편집 상태
+  // ✅ 편집 상태 (path는 slug로 자동 생성)
   const [editId, setEditId] = useState("");
-  const [edit, setEdit] = useState<Omit<MenuDoc, "id">>({
+  const [edit, setEdit] = useState<Omit<MenuDoc, "id" | "path">>({
     name: "",
-    path: "",
+    slug: "",
     group: "",
     order: 0,
     isActive: true,
@@ -81,16 +85,13 @@ export default function MenuManagePage() {
   });
 
   /**
-   * ✅ 관리자 여부 확인(핵심 수정)
-   * - 기존: custom claim(admin)만 확인 → users.role이 admin이어도 일반 사용자로 표기되는 문제
-   * - 변경: Firestore users/{uid}.role === 'admin' 를 기준으로 판정
-   * - 이유: Firestore rules의 adminLike 판정( users.role / whitelist / claim )과 기준을 일치시키기 위함
+   * ✅ 관리자 여부 확인
+   * - users/{uid}.role === 'admin' 기준 (rules와 동일 기준)
    */
   useEffect(() => {
     const run = async () => {
       setErr("");
 
-      // ✅ 비로그인이거나 DB 초기화 전이면 admin 아님
       if (!user || !db) {
         setIsAdmin(false);
         return;
@@ -99,8 +100,6 @@ export default function MenuManagePage() {
       try {
         setCheckingAdmin(true);
 
-        // ✅ users/{uid} 문서에서 role 확인
-        // - 문서가 없으면 admin으로 보지 않음
         const snap = await getDoc(doc(db, "users", user.uid));
         const role = snap.exists() ? (snap.data() as any)?.role : null;
 
@@ -128,16 +127,19 @@ export default function MenuManagePage() {
 
       setBusy(true);
 
-      // ✅ menus 컬렉션을 order asc로 로드
       const q = query(collection(db, COL), orderBy("order", "asc"));
       const snap = await getDocs(q);
 
       const rows: MenuDoc[] = snap.docs.map((d) => {
         const v = d.data() as any;
+        const slug = String(v.slug ?? "");
+        const path = String(v.path ?? buildPath(slug));
+
         return {
           id: d.id,
           name: String(v.name ?? ""),
-          path: String(v.path ?? ""),
+          slug,
+          path,
           group: String(v.group ?? ""),
           order: Number(v.order ?? 0),
           isActive: Boolean(v.isActive ?? true),
@@ -147,10 +149,6 @@ export default function MenuManagePage() {
 
       setMenus(rows);
     } catch (e: any) {
-      // ✅ 여기서 "Missing or insufficient permissions"가 뜬다면
-      // - 현재 rules에서 /menus read 허용 여부
-      // - 실제 앱이 같은 Firebase 프로젝트를 보고 있는지
-      // 를 점검해야 합니다.
       setErr(e?.message ?? "메뉴 목록 로드에 실패했습니다.");
     } finally {
       setBusy(false);
@@ -158,19 +156,26 @@ export default function MenuManagePage() {
   };
 
   useEffect(() => {
-    // ✅ 초기화 완료 후 로드
-    // - 비로그인도 목록 조회 가능 요구사항이므로, auth 로딩이 끝나면 로드 시도
     if (!loading && !initError) {
       loadMenus();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, initError]);
 
+  /** ✅ slug 정규화: 소문자 + 공백 제거(입력 중 보정) */
+  const normalizeSlug = (raw: string) => {
+    // ✅ 공백 제거 + 소문자 변환
+    const trimmed = raw.replace(/\s+/g, "").toLowerCase();
+    return trimmed;
+  };
+
   /** ✅ 입력값 검증 */
-  const validateMenu = (m: Omit<MenuDoc, "id">) => {
+  const validateMenu = (m: Omit<MenuDoc, "id" | "path">) => {
     if (!m.name.trim()) return "메뉴명을 입력해주세요.";
-    if (!m.path.trim()) return "경로(path)를 입력해주세요.";
-    if (!m.path.startsWith("/")) return "경로(path)는 반드시 / 로 시작해야 합니다.";
+    if (!m.slug.trim()) return "폴더명(영문)을 입력해주세요.";
+    if (!SLUG_REGEX.test(m.slug)) {
+      return "폴더명은 소문자 영문/숫자/_ 만 가능합니다. (공백/특수문자 불가)";
+    }
     return "";
   };
 
@@ -181,19 +186,21 @@ export default function MenuManagePage() {
       if (!isAdmin) return setErr("관리자만 메뉴를 추가할 수 있습니다.");
       if (!db) return;
 
-      const msg = validateMenu(form);
+      const normalized = { ...form, name: form.name.trim(), slug: normalizeSlug(form.slug) };
+      const msg = validateMenu(normalized);
       if (msg) return setErr(msg);
+
+      const path = buildPath(normalized.slug);
 
       setBusy(true);
       await addDoc(collection(db, COL), {
-        ...form,
-        name: form.name.trim(),
-        path: form.path.trim(),
+        ...normalized,
+        path, // ✅ 자동 생성 저장
         updatedAt: serverTimestamp(),
       });
 
       // ✅ 폼 최소 리셋
-      setForm((p) => ({ ...p, name: "", path: "" }));
+      setForm((p) => ({ ...p, name: "", slug: "" }));
       await loadMenus();
     } catch (e: any) {
       setErr(e?.message ?? "메뉴 추가에 실패했습니다.");
@@ -207,7 +214,7 @@ export default function MenuManagePage() {
     setEditId(m.id);
     setEdit({
       name: m.name,
-      path: m.path,
+      slug: m.slug,
       group: m.group,
       order: m.order,
       isActive: m.isActive,
@@ -223,14 +230,16 @@ export default function MenuManagePage() {
       if (!db) return;
       if (!editId) return;
 
-      const msg = validateMenu(edit);
+      const normalized = { ...edit, name: edit.name.trim(), slug: normalizeSlug(edit.slug) };
+      const msg = validateMenu(normalized);
       if (msg) return setErr(msg);
+
+      const path = buildPath(normalized.slug);
 
       setBusy(true);
       await updateDoc(doc(db, COL, editId), {
-        ...edit,
-        name: edit.name.trim(),
-        path: edit.path.trim(),
+        ...normalized,
+        path, // ✅ slug 변경 시 path도 동기화
         updatedAt: serverTimestamp(),
       });
 
@@ -262,6 +271,10 @@ export default function MenuManagePage() {
 
   // ✅ write 가능 조건: 관리자 + 권한확인 완료 + 현재 작업중 아님
   const canWrite = isAdmin && !checkingAdmin && !busy;
+
+  // ✅ 화면 표시용 path(자동 생성)
+  const previewPath = buildPath(normalizeSlug(form.slug));
+  const previewEditPath = buildPath(normalizeSlug(edit.slug));
 
   return (
     <main className="px-6 pb-10">
@@ -309,17 +322,30 @@ export default function MenuManagePage() {
                 value={form.name}
                 onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
                 className="mt-1 w-full rounded-lg border px-3 py-2"
-                placeholder="예: Workspace"
+                placeholder="예: 사용자 관리"
               />
             </label>
 
             <label className="text-sm">
-              경로(path)
+              폴더명(영문)
               <input
-                value={form.path}
-                onChange={(e) => setForm((p) => ({ ...p, path: e.target.value }))}
+                value={form.slug}
+                onChange={(e) => setForm((p) => ({ ...p, slug: normalizeSlug(e.target.value) }))}
                 className="mt-1 w-full rounded-lg border px-3 py-2"
-                placeholder="/workspace"
+                placeholder="예: user_management"
+              />
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                규칙: 소문자 영문/숫자/_ 만 가능 (공백/특수문자 불가)
+              </div>
+            </label>
+
+            {/* ✅ path는 자동 생성이므로 표시만 */}
+            <label className="text-sm">
+              생성 경로(path)
+              <input
+                value={previewPath}
+                readOnly
+                className="mt-1 w-full rounded-lg border bg-gray-50 px-3 py-2 text-gray-700 dark:bg-gray-900 dark:text-gray-200"
               />
             </label>
 
@@ -382,6 +408,7 @@ export default function MenuManagePage() {
                 <tr>
                   <th className="py-2">order</th>
                   <th className="py-2">name</th>
+                  <th className="py-2">slug</th>
                   <th className="py-2">path</th>
                   <th className="py-2">group</th>
                   <th className="py-2">active</th>
@@ -394,6 +421,7 @@ export default function MenuManagePage() {
                   <tr key={m.id} className="border-b">
                     <td className="py-2">{m.order}</td>
                     <td className="py-2">{m.name}</td>
+                    <td className="py-2">{m.slug}</td>
                     <td className="py-2">{m.path}</td>
                     <td className="py-2">{m.group}</td>
                     <td className="py-2">{m.isActive ? "Y" : "N"}</td>
@@ -420,7 +448,7 @@ export default function MenuManagePage() {
 
                 {menus.length === 0 && (
                   <tr>
-                    <td className="py-4 text-gray-600 dark:text-gray-300" colSpan={7}>
+                    <td className="py-4 text-gray-600 dark:text-gray-300" colSpan={8}>
                       등록된 메뉴가 없습니다.
                     </td>
                   </tr>
@@ -452,11 +480,23 @@ export default function MenuManagePage() {
                 </label>
 
                 <label className="text-sm">
-                  경로(path)
+                  폴더명(영문)
                   <input
-                    value={edit.path}
-                    onChange={(e) => setEdit((p) => ({ ...p, path: e.target.value }))}
+                    value={edit.slug}
+                    onChange={(e) => setEdit((p) => ({ ...p, slug: normalizeSlug(e.target.value) }))}
                     className="mt-1 w-full rounded-lg border px-3 py-2"
+                  />
+                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    규칙: 소문자 영문/숫자/_ 만 가능 (공백/특수문자 불가)
+                  </div>
+                </label>
+
+                <label className="text-sm">
+                  생성 경로(path)
+                  <input
+                    value={previewEditPath}
+                    readOnly
+                    className="mt-1 w-full rounded-lg border bg-gray-50 px-3 py-2 text-gray-700 dark:bg-gray-900 dark:text-gray-200"
                   />
                 </label>
 
