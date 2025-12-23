@@ -2,8 +2,7 @@
 // contents 이하 페이지들의 공통 프레임 레이아웃 (Server Component)
 // 반영사항:
 // 1) 헤더 우측: 구독 버튼 1개만 노출
-// 2) 좌측 메뉴: 샘플 메뉴 + "Menu Setting"(실제 라우트는 기존 /contents/menu로 연결)
-// 3) User Management 메뉴 추가 → /user
+// 2) 좌측 메뉴: 샘플 메뉴 + Menu Setting(/contents/menu) + User Management(/contents/user)
 
 import type { ReactNode } from "react";
 import Link from "next/link";
@@ -61,8 +60,9 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
               Sample Menu 3
             </Link>
 
-            {/* ✅ 실제 메뉴관리 페이지(/contents/menu)로 연결 */}
+            {/* 관리 메뉴 */}
             <div className="pt-3 mt-3 border-t border-gray-200 dark:border-gray-800 space-y-1">
+              {/* Menu Setting: 기존 menu 페이지 사용 */}
               <Link
                 href="/contents/menu"
                 className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
@@ -70,9 +70,9 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
                 Menu Setting
               </Link>
 
-              {/* ✅ 추가: User Management (/user) */}
+              {/* ✅ User Management: /contents/user 로 정확히 연결 */}
               <Link
-                href="/user"
+                href="/contents/user"
                 className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
               >
                 User Management
