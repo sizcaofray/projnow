@@ -1,11 +1,14 @@
 // app/contents/layout.tsx
 // contents 이하 페이지들의 공통 프레임 레이아웃 (Server Component)
 // 변경사항:
-// - Menu Setting / User Management 메뉴는 admin에게만 노출되도록 Client Component로 분리
+// - 샘플 메뉴 제거
+// - Firestore menus를 실시간으로 읽어 Sidebar에 반영하는 Client Component(ContentsMenuLinks) 추가
+// - Menu Setting / User Management 메뉴는 admin에게만 노출되도록 AdminOnlyLinks 유지
 
 import type { ReactNode } from "react";
 import Link from "next/link";
 import AdminOnlyLinks from "@/components/AdminOnlyLinks";
+import ContentsMenuLinks from "@/components/ContentsMenuLinks";
 
 export default function ContentsLayout({ children }: { children: ReactNode }) {
   return (
@@ -38,27 +41,8 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
         {/* Sidebar */}
         <aside className="w-64 border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
           <nav className="p-4 space-y-1">
-            {/* 샘플 메뉴(임시) */}
-            <Link
-              href="/contents/sample-1"
-              className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
-            >
-              Sample Menu 1
-            </Link>
-
-            <Link
-              href="/contents/sample-2"
-              className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
-            >
-              Sample Menu 2
-            </Link>
-
-            <Link
-              href="/contents/sample-3"
-              className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
-            >
-              Sample Menu 3
-            </Link>
+            {/* ✅ Firestore menus 실시간 반영 메뉴 */}
+            <ContentsMenuLinks />
 
             {/* ✅ 관리 메뉴(관리자만 노출) */}
             <div className="pt-3 mt-3 border-t border-gray-200 dark:border-gray-800 space-y-1">
