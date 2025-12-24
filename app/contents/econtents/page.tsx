@@ -6,15 +6,15 @@ import React, { useMemo, useRef, useState } from "react";
  * app/contents/econtents/page.tsx
  *
  * ✅ 기능
- * - DOCX 우선, 없으면 PDF
- * - 템플릿 XLSX 함께 업로드
- * - API 호출 후 생성된 XLSX 다운로드
+ * - Protocol DOCX 우선(없으면 PDF)
+ * - eContents 템플릿 XLSX 업로드
+ * - /api/econtents/generate 호출 후 XLSX 다운로드
  *
- * ✅ 보강(로직만)
- * 1) DOCX 선택 시 PDF 자동 초기화(혼동 방지)
- * 2) 같은 파일 재선택 시에도 onChange가 동작하도록 input value 초기화(ref)
- * 3) 서버가 Content-Disposition으로 파일명을 주면 그 파일명으로 다운로드
+ * ✅ 주의
+ * - 이 파일은 "예시 UI"가 아니라 실제 화면으로 쓸 수 있도록 정리된 버전입니다.
+ * - 디자인은 프로젝트 톤(다크/보더/라운드) 기준으로 깔끔하게 구성했습니다.
  */
+
 export default function EContentsPage() {
   // 업로드 파일 상태
   const [docx, setDocx] = useState<File | null>(null);
@@ -25,80 +25,49 @@ export default function EContentsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string>("");
 
-  // ✅ input ref (같은 파일 재선택 가능하도록 value reset)
+  // ✅ 같은 파일 재선택 시 change가 안 뜨는 경우를 방지하기 위한 ref
   const docxInputRef = useRef<HTMLInputElement | null>(null);
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const templateInputRef = useRef<HTMLInputElement | null>(null);
 
-  // DOCX 우선 규칙에 따른 실제 입력 파일 표시용
   const activeInputLabel = useMemo(() => {
     if (docx) return `DOCX: ${docx.name}`;
     if (pdf) return `PDF: ${pdf.name}`;
     return "입력 파일 없음";
   }, [docx, pdf]);
 
-  /**
-   * DOCX 파일 선택 핸들러
-   * - ✅ DOCX 선택 시 PDF는 자동 초기화(혼동 방지)
-   * - ✅ 같은 파일 재선택 가능하도록 input value 비움
-   */
+  /** DOCX 선택(우선) */
   const onPickDocx = (f: File | null) => {
     setErrorMsg("");
     setDocx(f);
 
-    // ✅ DOCX가 우선이므로, PDF는 자동 초기화
+    // ✅ 혼동 방지: DOCX 선택 시 PDF는 자동 초기화
     if (f) setPdf(null);
 
-    // ✅ 같은 파일을 다시 선택할 때 change가 안 뜨는 문제 방지
+    // ✅ 같은 파일 재선택 대비
     if (docxInputRef.current) docxInputRef.current.value = "";
     if (pdfInputRef.current) pdfInputRef.current.value = "";
   };
 
-  /**
-   * PDF 파일 선택 핸들러
-   * - DOCX가 없을 때만 사용되는 fallback
-   * - ✅ PDF 선택 시 DOCX가 이미 있으면 그대로 두되, 안내 라벨은 DOCX가 우선
-   */
+  /** PDF 선택(fallback) */
   const onPickPdf = (f: File | null) => {
     setErrorMsg("");
     setPdf(f);
 
+    // ✅ 같은 파일 재선택 대비
     if (pdfInputRef.current) pdfInputRef.current.value = "";
   };
 
-  /**
-   * eContents 템플릿 XLSX 선택 핸들러
-   */
+  /** 템플릿 선택 */
   const onPickTemplate = (f: File | null) => {
     setErrorMsg("");
     setTemplate(f);
 
+    // ✅ 같은 파일 재선택 대비
     if (templateInputRef.current) templateInputRef.current.value = "";
   };
 
-  /**
-   * Content-Disposition에서 파일명 파싱
-   */
-  const getFilenameFromDisposition = (disposition: string | null) => {
-    if (!disposition) return null;
-
-    // 예: attachment; filename="xxx.xlsx"
-    const m1 = disposition.match(/filename="([^"]+)"/i);
-    if (m1?.[1]) return m1[1];
-
-    // 예: attachment; filename=xxx.xlsx
-    const m2 = disposition.match(/filename=([^;]+)/i);
-    if (m2?.[1]) return m2[1].trim();
-
-    return null;
-  };
-
-  /**
-   * 생성 실행
-   * - 템플릿 XLSX 필수
-   * - 입력은 DOCX 우선, 없으면 PDF
-   * - API 응답(blob)을 다운로드
-   */
+  /** 생성 실행 */
   const onGenerate = async () => {
     try {
       setErrorMsg("");
@@ -131,16 +100,12 @@ export default function EContentsPage() {
         throw new Error(data?.message ?? "생성 요청에 실패했습니다.");
       }
 
-      // ✅ 서버가 내려주는 파일명 우선 적용
-      const dispo = res.headers.get("content-disposition");
-      const serverFilename = getFilenameFromDisposition(dispo);
-
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
 
       const a = document.createElement("a");
       a.href = url;
-      a.download = serverFilename || "econtents_generated.xlsx";
+      a.download = "econtents_generated.xlsx";
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -153,38 +118,97 @@ export default function EContentsPage() {
     }
   };
 
-  /**
-   * ✅ 아래 return 영역은 사용자님 기존 마크업을 유지하셔야 합니다.
-   * 현재 return은 예시이므로, 실제 UI 컴포넌트에 ref/onChange/onClick만 연결하세요.
-   */
   return (
-    <div>
-      <div style={{ marginBottom: 8 }}>선택된 입력: {activeInputLabel}</div>
-      {errorMsg && <div style={{ color: "red", marginBottom: 8 }}>{errorMsg}</div>}
+    <main className="px-6 pb-10">
+      <div className="mx-auto max-w-6xl">
+        <h1 className="text-2xl font-bold">eContents</h1>
 
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <input
-          ref={docxInputRef}
-          type="file"
-          accept=".docx"
-          onChange={(e) => onPickDocx(e.target.files?.[0] ?? null)}
-        />
-        <input
-          ref={pdfInputRef}
-          type="file"
-          accept=".pdf"
-          onChange={(e) => onPickPdf(e.target.files?.[0] ?? null)}
-        />
-        <input
-          ref={templateInputRef}
-          type="file"
-          accept=".xlsx"
-          onChange={(e) => onPickTemplate(e.target.files?.[0] ?? null)}
-        />
-        <button onClick={onGenerate} disabled={isLoading}>
-          {isLoading ? "생성 중..." : "eContents 생성"}
-        </button>
+        <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+          선택된 입력: <span className="font-medium">{activeInputLabel}</span>
+        </div>
+
+        {errorMsg ? (
+          <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+            {errorMsg}
+          </div>
+        ) : null}
+
+        <section className="mt-8 rounded-2xl border p-6">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-lg font-semibold">파일 업로드</h2>
+
+            <button
+              onClick={onGenerate}
+              disabled={isLoading}
+              className="rounded-xl bg-gray-900 px-4 py-2 text-sm text-white disabled:opacity-60 dark:bg-white dark:text-gray-900"
+              title="템플릿+프로토콜을 업로드한 뒤 생성 버튼을 눌러주세요."
+            >
+              {isLoading ? "생성 중..." : "eContents 생성"}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            {/* DOCX */}
+            <div className="rounded-xl border p-4">
+              <div className="text-sm font-semibold">Protocol DOCX (우선)</div>
+              <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                DOCX가 있으면 PDF는 무시됩니다.
+              </div>
+              <input
+                ref={docxInputRef}
+                className="mt-3 block w-full text-sm"
+                type="file"
+                accept=".docx"
+                onChange={(e) => onPickDocx(e.target.files?.[0] ?? null)}
+              />
+              <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
+                선택: {docx ? docx.name : "없음"}
+              </div>
+            </div>
+
+            {/* PDF */}
+            <div className="rounded-xl border p-4">
+              <div className="text-sm font-semibold">Protocol PDF (DOCX 없을 때)</div>
+              <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                DOCX가 없을 때만 사용됩니다.
+              </div>
+              <input
+                ref={pdfInputRef}
+                className="mt-3 block w-full text-sm"
+                type="file"
+                accept=".pdf"
+                onChange={(e) => onPickPdf(e.target.files?.[0] ?? null)}
+              />
+              <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
+                선택: {pdf ? pdf.name : "없음"}
+              </div>
+            </div>
+
+            {/* TEMPLATE */}
+            <div className="rounded-xl border p-4">
+              <div className="text-sm font-semibold">eContents 템플릿 XLSX</div>
+              <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                예시로 올려주신 eContents 파일 형식입니다.
+              </div>
+              <input
+                ref={templateInputRef}
+                className="mt-3 block w-full text-sm"
+                type="file"
+                accept=".xlsx"
+                onChange={(e) => onPickTemplate(e.target.files?.[0] ?? null)}
+              />
+              <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
+                선택: {template ? template.name : "없음"}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 text-xs text-gray-600 dark:text-gray-300">
+            ※ 생성이 안 되면 대부분 <span className="font-medium">/api/econtents/generate</span> API 라우트가 없거나
+            서버 에러입니다.
+          </div>
+        </section>
       </div>
-    </div>
+    </main>
   );
 }
