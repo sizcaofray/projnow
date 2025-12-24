@@ -3,7 +3,7 @@
 /**
  * app/contents/menu/page.tsx
  *
- * ✅ 변경사항(이번 수정)
+ * ✅ 기존 변경사항(이전 수정)
  * - (버그 수정) "기능 메뉴가 목록에서 안 보이는" 케이스:
  *   초기 expanded가 최상위만 true라서, 중간 카테고리(또는 메뉴관리)가 접힌 상태면
  *   그 하위 기능(hasPage=true) 메뉴가 flatVisible에 포함되지 않아 리스트에서 사라져 보였습니다.
@@ -15,6 +15,11 @@
  * ✅ 기존 요구사항 유지
  * - 목록 Row의 "같은레벨 추가 / 하위메뉴" 버튼 없음
  * - 계층 지정은 "상위 메뉴(소속)" select로만 처리
+ *
+ * ✅ 이번 추가 변경사항(요청 반영)
+ * - 기능(페이지) 메뉴 삭제 시:
+ *   "관련 페이지 파일을 수동으로 삭제/정리했는지" 확인하는 confirm을 추가
+ *   (Next.js 환경에서 런타임으로 파일 삭제/존재 확인은 불가하므로 수동 정리 안내로 사고 예방)
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -435,6 +440,22 @@ export default function MenuManagePage() {
 
       const hasChildren = menus.some((m) => m.parentId === id);
       if (hasChildren) return setErr("하위 메뉴가 존재합니다. 하위 메뉴를 먼저 삭제해주세요.");
+
+      // ✅ [추가] 기능(페이지) 메뉴 삭제 시: 수동 파일 정리 확인
+      const target = menus.find((m) => m.id === id);
+      if (target?.hasPage && target.slug) {
+        const ok = window.confirm(
+          [
+            "이 메뉴는 기능(페이지) 메뉴입니다.",
+            "",
+            "아래 파일을 수동으로 삭제/정리했는지 확인해주세요:",
+            `- app/contents/${target.slug}/page.tsx`,
+            "",
+            "확인 후 메뉴를 삭제하시겠습니까?",
+          ].join("\n")
+        );
+        if (!ok) return;
+      }
 
       setBusy(true);
       await deleteDoc(doc(db, COL, id));
