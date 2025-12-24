@@ -16,12 +16,6 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
       {/* Header */}
       <header className="sticky top-0 z-50 border-b border-gray-200 dark:border-gray-800 bg-white/80 dark:bg-gray-900/80 backdrop-blur">
         <div className="h-14 px-4 flex items-center justify-between">
-          {/* 좌측: 서비스명 */}
-          <div className="flex items-center gap-3">
-            <Link href="/contents" className="font-bold text-lg">
-              projnow
-            </Link>
-          </div>
 
           {/* 우측: 구독 버튼만 */}
           <div className="flex items-center justify-end">
