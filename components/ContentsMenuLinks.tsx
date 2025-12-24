@@ -3,19 +3,16 @@
 /**
  * components/ContentsMenuLinks.tsx
  *
- * ✅ 목표(요청 반영)
- * - 좌측에는 "최상위 메뉴"만 표시
- * - 최상위 메뉴에 마우스오버하면 오른쪽(1단) 패널에 "직계 자식(카테고리/기능)" 표시
- * - 1단 패널에서 카테고리에 마우스오버하면 오른쪽(2단) 패널에 "그 카테고리의 자식" 표시
- *
- * ✅ 왜 필요한가?
- * - 현재 사용자 메뉴 구조가 "카테고리 → 카테고리 → 기능" 형태라
- *   "기능만 필터링"하면 1단 패널이 비어 하위가 아예 안 보입니다.
+ * ✅ 사용자 요구사항 반영(원래 계획대로)
+ * 1) 좌측 메뉴에는 "카테고리(hasPage=false)"만 트리로 표시합니다.
+ * 2) 마지막 기능 메뉴(hasPage=true)는 좌측에 표시하지 않습니다.
+ * 3) 카테고리에 마우스 오버하면, 그 카테고리의 직계 자식 중
+ *    "기능 메뉴(hasPage=true)"만 오른쪽(옆) 패널에 펼쳐서 보여줍니다.
  *
  * ✅ 기타
- * - isAdmin props는 optional 유지(빌드 안정)
- * - adminOnly 메뉴는 isAdmin일 때만 노출
+ * - isAdmin props는 optional 처리(레이아웃에서 props 누락되어도 빌드 깨짐 방지)
  * - isActive=true만 노출
+ * - adminOnly=true는 isAdmin일 때만 노출
  */
 
 import Link from "next/link";
@@ -39,7 +36,7 @@ type MenuDoc = {
 const COL = "menus";
 
 export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
-  // ✅ props가 없어도 동작하도록 기본값 처리
+  // ✅ props 누락 대비(빌드 안정)
   const isAdmin = Boolean(props?.isAdmin);
 
   const db = useMemo(() => {
@@ -52,16 +49,14 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
 
   const [menus, setMenus] = useState<MenuDoc[]>([]);
 
-  // ✅ 1단/2단 패널 상태
-  const [hoverParentId, setHoverParentId] = useState<string | null>(null); // 좌측 최상위에 hover된 id
-  const [panelTop1, setPanelTop1] = useState(0);
+  // ✅ 좌측 트리(카테고리) 펼침 상태
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
-  const [hoverChildCategoryId, setHoverChildCategoryId] = useState<string | null>(null); // 1단 패널에서 hover된 "카테고리" id
-  const [panelTop2, setPanelTop2] = useState(0);
+  // ✅ 옆 패널 상태: "오버된 카테고리"
+  const [hoverCategoryId, setHoverCategoryId] = useState<string | null>(null);
+  const [panelTop, setPanelTop] = useState(0);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
-
-  // ✅ 닫힘 딜레이(패널 이동 시 깜빡임 방지)
   const closeTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -97,16 +92,41 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
         });
 
         setMenus(rows);
+
+        // ✅ 최초 1회만: 자식 카테고리가 있는 카테고리를 기본 펼침
+        setExpanded((prev) => {
+          if (Object.keys(prev).length > 0) return prev;
+
+          // "카테고리"들만 대상으로 펼침 계산
+          const categories = rows.filter((m) => !m.hasPage);
+          const catIds = new Set(categories.map((c) => c.id));
+
+          // 자식이 "카테고리"인 경우에만 펼침 대상으로 잡습니다.
+          const parentSet = new Set<string>();
+          categories.forEach((m) => {
+            if (m.parentId && catIds.has(m.parentId)) parentSet.add(m.parentId);
+          });
+
+          const next: Record<string, boolean> = {};
+          parentSet.forEach((pid) => (next[pid] = true));
+
+          // 최상위 카테고리도 기본 펼침(원치 않으면 false로 바꾸셔도 됩니다)
+          categories.forEach((m) => {
+            if (m.parentId === null) next[m.id] = true;
+          });
+
+          return next;
+        });
       },
       () => {
-        // ✅ 구독 실패 시 무시(앱 중단 방지)
+        // 구독 실패 시 앱 중단 방지
       }
     );
 
     return () => unsub();
   }, [db]);
 
-  // ✅ 노출 필터(활성 + adminOnly 처리)
+  // ✅ 노출 필터(활성 + adminOnly)
   const visibleMenus = useMemo(() => {
     return menus
       .filter((m) => m.isActive)
@@ -125,22 +145,20 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
     return map;
   }, [visibleMenus]);
 
-  // ✅ 최상위 메뉴(좌측에 표시)
-  const topLevelMenus = useMemo(() => {
-    return childrenByParent.get(null) ?? [];
-  }, [childrenByParent]);
+  // ✅ 좌측 트리에 표시할 대상은 "카테고리(hasPage=false)"만
+  const isCategory = (m: MenuDoc) => !m.hasPage;
 
-  // ✅ hover된 최상위 메뉴의 직계 자식(1단 패널)
-  const panelChildrenLevel1 = useMemo(() => {
-    if (!hoverParentId) return [];
-    return childrenByParent.get(hoverParentId) ?? [];
-  }, [childrenByParent, hoverParentId]);
+  const categoryChildrenCount = (categoryId: string) => {
+    const kids = childrenByParent.get(categoryId) ?? [];
+    return kids.filter(isCategory).length;
+  };
 
-  // ✅ 1단 패널에서 hover된 "카테고리"의 자식(2단 패널)
-  const panelChildrenLevel2 = useMemo(() => {
-    if (!hoverChildCategoryId) return [];
-    return childrenByParent.get(hoverChildCategoryId) ?? [];
-  }, [childrenByParent, hoverChildCategoryId]);
+  // ✅ 오버된 카테고리의 "직계 자식 중 기능 메뉴(hasPage=true)"만 옆 패널에 표시
+  const hoverLeafPages = useMemo(() => {
+    if (!hoverCategoryId) return [];
+    const kids = childrenByParent.get(hoverCategoryId) ?? [];
+    return kids.filter((m) => m.hasPage && !!m.path);
+  }, [childrenByParent, hoverCategoryId]);
 
   const computeTop = (el: HTMLElement | null) => {
     const container = containerRef.current;
@@ -150,188 +168,104 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
     return eRect.top - cRect.top;
   };
 
-  const openPanel1 = (menuId: string, el: HTMLElement | null) => {
-    // ✅ 닫힘 타이머 취소
+  const openHoverPanel = (categoryId: string, el: HTMLElement | null) => {
+    // ✅ 닫힘 예약 취소
     if (closeTimerRef.current) {
       window.clearTimeout(closeTimerRef.current);
       closeTimerRef.current = null;
     }
 
-    setHoverParentId(menuId);
-    setPanelTop1(computeTop(el));
-
-    // ✅ 1단 패널이 바뀌면 2단 패널은 초기화(이전 상태 잔존 방지)
-    setHoverChildCategoryId(null);
-    setPanelTop2(0);
+    setHoverCategoryId(categoryId);
+    setPanelTop(computeTop(el));
   };
 
-  const openPanel2 = (categoryId: string, el: HTMLElement | null) => {
-    setHoverChildCategoryId(categoryId);
-    setPanelTop2(computeTop(el));
-  };
-
-  const scheduleCloseAllPanels = () => {
+  const scheduleCloseHoverPanel = () => {
     if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
     closeTimerRef.current = window.setTimeout(() => {
-      setHoverParentId(null);
-      setHoverChildCategoryId(null);
+      setHoverCategoryId(null);
       closeTimerRef.current = null;
     }, 120);
   };
 
-  const cancelClose = () => {
+  const cancelCloseHoverPanel = () => {
     if (closeTimerRef.current) {
       window.clearTimeout(closeTimerRef.current);
       closeTimerRef.current = null;
     }
   };
 
-  const hasChildren = (id: string) => (childrenByParent.get(id) ?? []).length > 0;
+  const toggleExpand = (id: string) => {
+    setExpanded((p) => ({ ...p, [id]: !(p[id] ?? false) }));
+  };
 
-  return (
-    <div ref={containerRef} className="relative" onMouseLeave={scheduleCloseAllPanels} onMouseEnter={cancelClose}>
-      {/* ✅ 좌측: 최상위 메뉴만 표시 */}
+  const renderCategoryTree = (parentId: string | null, depth: number) => {
+    const kids = (childrenByParent.get(parentId) ?? []).filter(isCategory);
+    if (kids.length === 0) return null;
+
+    return (
       <div className="space-y-1">
-        {topLevelMenus.map((m) => {
-          const childExists = hasChildren(m.id);
+        {kids.map((cat) => {
+          const childCatsCount = categoryChildrenCount(cat.id);
+          const hasChildCategories = childCatsCount > 0;
+          const isOpen = expanded[cat.id] ?? false;
+          const padLeft = 12 + depth * 12;
 
-          // ✅ 최상위가 기능 메뉴면 클릭 이동도 가능 (원하시면 막을 수 있음)
-          if (m.hasPage) {
-            return (
-              <div
-                key={m.id}
-                onMouseEnter={(e) => {
-                  // 기능 메뉴도 자식이 있으면 패널 오픈 가능
-                  if (childExists) openPanel1(m.id, e.currentTarget as unknown as HTMLElement);
-                }}
-              >
-                <Link
-                  href={m.path || "#"}
-                  className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
-                  title={m.path}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="truncate">{m.name}</span>
-                    <span className="text-xs opacity-70">{childExists ? "▸" : ""}</span>
-                  </div>
-                </Link>
-              </div>
-            );
-          }
-
-          // ✅ 최상위 카테고리: hover로 1단 패널 오픈
           return (
-            <div key={m.id} onMouseEnter={(e) => openPanel1(m.id, e.currentTarget as unknown as HTMLElement)}>
+            <div key={cat.id}>
+              {/* ✅ 카테고리는 좌측에 표시 + hover 시 옆 패널에 "기능 메뉴"만 표시 */}
               <button
                 type="button"
                 className="w-full flex items-center justify-between px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
+                style={{ paddingLeft: padLeft }}
                 title="카테고리"
+                onMouseEnter={(e) => openHoverPanel(cat.id, e.currentTarget as unknown as HTMLElement)}
+                onMouseLeave={scheduleCloseHoverPanel}
+                onClick={() => {
+                  // ✅ 좌측에서는 카테고리만 접기/펼치기
+                  if (hasChildCategories) toggleExpand(cat.id);
+                }}
               >
-                <span className="truncate">{m.name}</span>
-                <span className="text-xs opacity-70">{childExists ? "▸" : ""}</span>
+                <span className="truncate">{cat.name}</span>
+                <span className="text-xs opacity-70">
+                  {hasChildCategories ? (isOpen ? "▾" : "▸") : ""}
+                </span>
               </button>
+
+              {/* ✅ 카테고리 하위 카테고리는 좌측에 계속 표시 */}
+              {hasChildCategories && isOpen ? (
+                <div className="mt-1">{renderCategoryTree(cat.id, depth + 1)}</div>
+              ) : null}
             </div>
           );
         })}
       </div>
+    );
+  };
 
-      {/* ✅ 1단 패널: hover된 최상위 메뉴의 직계 자식(카테고리/기능 모두 표시) */}
-      {hoverParentId && panelChildrenLevel1.length > 0 ? (
+  return (
+    <div ref={containerRef} className="relative">
+      {/* ✅ 좌측: 카테고리 트리만 */}
+      {renderCategoryTree(null, 0)}
+
+      {/* ✅ 오른쪽(옆) 패널: 해당 카테고리의 "기능 메뉴"만 */}
+      {hoverCategoryId && hoverLeafPages.length > 0 ? (
         <div
           className="absolute left-full ml-2 w-56 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg"
-          style={{ top: panelTop1 }}
-          onMouseEnter={cancelClose}
-          onMouseLeave={scheduleCloseAllPanels}
+          style={{ top: panelTop }}
+          onMouseEnter={cancelCloseHoverPanel}
+          onMouseLeave={scheduleCloseHoverPanel}
         >
           <div className="p-2 space-y-1">
-            {panelChildrenLevel1.map((c) => {
-              const childExists = hasChildren(c.id);
-
-              // ✅ 1단 패널의 카테고리: hover 시 2단 패널 오픈
-              if (!c.hasPage) {
-                return (
-                  <div
-                    key={c.id}
-                    onMouseEnter={(e) => {
-                      if (childExists) openPanel2(c.id, e.currentTarget as unknown as HTMLElement);
-                      else {
-                        // 자식 없는 카테고리면 2단 패널 닫기
-                        setHoverChildCategoryId(null);
-                        setPanelTop2(0);
-                      }
-                    }}
-                  >
-                    <button
-                      type="button"
-                      className="w-full flex items-center justify-between rounded px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-                      title="카테고리"
-                    >
-                      <span className="truncate">{c.name}</span>
-                      <span className="text-xs opacity-70">{childExists ? "▸" : ""}</span>
-                    </button>
-                  </div>
-                );
-              }
-
-              // ✅ 1단 패널의 기능 메뉴: 클릭 이동
-              return (
-                <Link
-                  key={c.id}
-                  href={c.path || "#"}
-                  className="block rounded px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-                  title={c.path}
-                  onMouseEnter={() => {
-                    // 기능 메뉴 hover 시 2단 패널은 닫아 깔끔하게
-                    setHoverChildCategoryId(null);
-                    setPanelTop2(0);
-                  }}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="truncate">{c.name}</span>
-                    <span className="text-xs opacity-70">{childExists ? "▸" : ""}</span>
-                  </div>
-                </Link>
-              );
-            })}
-          </div>
-        </div>
-      ) : null}
-
-      {/* ✅ 2단 패널: 1단 패널의 카테고리에 hover 시 그 자식 표시 */}
-      {hoverChildCategoryId && panelChildrenLevel2.length > 0 ? (
-        <div
-          className="absolute left-full ml-[240px] w-56 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg"
-          style={{ top: panelTop2 }}
-          onMouseEnter={cancelClose}
-          onMouseLeave={scheduleCloseAllPanels}
-        >
-          <div className="p-2 space-y-1">
-            {panelChildrenLevel2.map((g) => {
-              const childExists = hasChildren(g.id);
-
-              // ✅ 2단 패널에서는 "기능 메뉴" 위주로 보이게 하되, 카테고리도 필요하면 표시
-              if (!g.hasPage) {
-                return (
-                  <div key={g.id} className="rounded px-3 py-2 text-sm opacity-80">
-                    <div className="flex items-center justify-between">
-                      <span className="truncate">{g.name}</span>
-                      <span className="text-xs opacity-70">{childExists ? "▸" : ""}</span>
-                    </div>
-                  </div>
-                );
-              }
-
-              return (
-                <Link
-                  key={g.id}
-                  href={g.path || "#"}
-                  className="block rounded px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-                  title={g.path}
-                >
-                  {g.name}
-                </Link>
-              );
-            })}
+            {hoverLeafPages.map((p) => (
+              <Link
+                key={p.id}
+                href={p.path}
+                className="block rounded px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
+                title={p.path}
+              >
+                {p.name}
+              </Link>
+            ))}
           </div>
         </div>
       ) : null}
