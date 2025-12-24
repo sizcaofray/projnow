@@ -2,144 +2,190 @@
 
 /**
  * components/ContentsMenuLinks.tsx
- * - Firestore menus를 읽어 Sidebar 메뉴를 렌더링합니다.
- * - "기능 페이지가 존재하는(= href/path가 있는) 메뉴"는 leaf로 간주합니다.
- * - 부모(카테고리) 메뉴에 마우스오버 시, 해당 부모의 자식(leaf) 메뉴만 오른쪽 패널로 노출합니다.
  *
- * ⚠️ Firestore 문서 필드명은 프로젝트에 맞게 아래 MenuDoc 타입의 키를 맞춰주세요.
+ * ✅ 역할
+ * - Firestore "menus" 컬렉션을 onSnapshot으로 실시간 구독
+ * - isActive=true 만 노출
+ * - adminOnly=true 는 관리자만 노출
+ * - hasPage=false(카테고리)면 링크 없이 접기/펼치기 버튼으로 표시
+ * - hasPage=true(기능)면 path로 Link 이동
+ *
+ * ✅ 추가 요구사항 반영
+ * - "이전 단계(부모) 메뉴"에 마우스오버 시,
+ *   오버된 메뉴 옆(오른쪽)에 "기능이 있는 메뉴(hasPage=true)"만 표시하는 패널을 노출
+ * - 패널로 마우스 이동해도 유지되도록 close 타이머 처리
+ *
+ * ✅ 가정(현재 메뉴 관리 페이지 설계와 동일)
+ * - menus 문서 필드: name, parentId, order, isActive, adminOnly, hasPage, path
+ * - 관리자 판정: users/{uid}.role === "admin"
  */
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { collection, doc, getDoc, onSnapshot, orderBy, query } from "firebase/firestore";
 
-// ✅ 프로젝트에 이미 쓰고 있는 firebase export에 맞게 경로/이름만 맞추세요.
-// 예: import { db } from "@/lib/firebase/firebase";
-import { db } from "@/lib/firebase/firebase";
+import { useAuth } from "@/lib/auth/useAuth";
+import { getFirebaseDb } from "@/lib/firebase/client";
 
-// ✅ firestore 모듈 사용
-import {
-  collection,
-  onSnapshot,
-  orderBy,
-  query,
-  Timestamp,
-} from "firebase/firestore";
-
-/** Firestore menu 문서 타입(필드명 프로젝트에 맞게 조정) */
 type MenuDoc = {
-  id: string; // 문서 ID
-  label: string; // 표시명(한글)
-  englishName?: string; // 영문명(변경 불가 정책이면 그냥 표시용)
-  parentId?: string | null; // 상위 메뉴 id (최상위는 null/undefined)
-  order?: number; // 정렬
-  href?: string; // 기능 페이지 경로(leaf)
-  path?: string; // 프로젝트에서 path를 쓰면 href 대신 path로 매핑
-  isCategory?: boolean; // 카테고리 전용 여부(있으면 더 안정적)
-  createdAt?: Timestamp;
-};
-
-/** 내부 렌더링용 */
-type MenuNode = MenuDoc & {
-  parentKey: string; // 정규화된 parentId
-  link: string; // 정규화된 링크
-  isLeaf: boolean; // 기능 페이지 존재 여부
+  id: string;
+  name: string;
+  parentId: string | null;
+  order: number;
+  isActive: boolean;
+  adminOnly: boolean;
+  hasPage: boolean;
+  path: string;
 };
 
 export default function ContentsMenuLinks() {
-  // ✅ 메뉴 원본
-  const [menus, setMenus] = useState<MenuNode[]>([]);
-  // ✅ 현재 hover된 부모 메뉴 id
+  const { user } = useAuth();
+
+  const db = useMemo(() => {
+    try {
+      return getFirebaseDb();
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [menus, setMenus] = useState<MenuDoc[]>([]);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+  /**
+   * ✅ Hover 패널 제어 상태
+   * - hoverParentId: 현재 마우스오버된 "부모 메뉴" ID
+   * - panelTop: 패널이 붙을 Y 위치(사이드바 컨테이너 기준)
+   */
   const [hoverParentId, setHoverParentId] = useState<string | null>(null);
-  // ✅ 패널 유지용(부모/패널 사이 이동 시 깜빡임 방지)
+  const [panelTop, setPanelTop] = useState<number>(0);
+
+  // ✅ 깜빡임 방지용 타이머
   const closeTimerRef = useRef<number | null>(null);
 
+  // ✅ 패널 위치 계산을 위한 컨테이너 ref
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // ✅ 관리자 여부 확인(users/{uid}.role)
   useEffect(() => {
-    /**
-     * Firestore 실시간 구독
-     * - 컬렉션 경로는 실제 사용 중인 경로로 맞추세요.
-     *   예) "menus" 또는 "appMenus" 등
-     */
+    const run = async () => {
+      if (!db || !user) {
+        setIsAdmin(false);
+        return;
+      }
+
+      try {
+        const snap = await getDoc(doc(db, "users", user.uid));
+        const role = snap.exists() ? (snap.data() as any)?.role : null;
+        setIsAdmin(role === "admin");
+      } catch {
+        setIsAdmin(false);
+      }
+    };
+
+    run();
+  }, [db, user]);
+
+  // ✅ menus 실시간 구독
+  useEffect(() => {
+    if (!db) return;
+
     const q = query(collection(db, "menus"), orderBy("order", "asc"));
 
     const unsub = onSnapshot(
       q,
       (snap) => {
-        const next: MenuNode[] = snap.docs.map((d) => {
-          const data = d.data() as Omit<MenuDoc, "id">;
+        const rows: MenuDoc[] = snap.docs.map((d) => {
+          const v = d.data() as any;
 
-          // ✅ 프로젝트에서 href / path 중 무엇을 쓰는지에 따라 정규화
-          const rawLink = (data.href || (data as any).path || "") as string;
-
-          // ✅ 기능 페이지 존재 여부: link가 있으면 leaf로 간주
-          const isLeaf = !!rawLink;
+          const parentIdRaw = v.parentId ?? null;
+          const parentId = parentIdRaw === "" ? null : (parentIdRaw as string | null);
 
           return {
             id: d.id,
-            ...data,
-            parentKey: (data.parentId ?? "") as string,
-            link: rawLink,
-            isLeaf,
+            name: String(v.name ?? ""),
+            parentId,
+            order: Number(v.order ?? 0),
+            isActive: Boolean(v.isActive ?? true),
+            adminOnly: Boolean(v.adminOnly ?? false),
+            hasPage: Boolean(v.hasPage ?? false),
+            path: String(v.path ?? ""),
           };
         });
 
-        setMenus(next);
+        setMenus(rows);
+
+        // ✅ 초기 1회만: 최상위는 기본 펼침
+        setExpanded((prev) => {
+          if (Object.keys(prev).length > 0) return prev;
+          const next: Record<string, boolean> = {};
+          rows.forEach((m) => {
+            if (m.parentId === null) next[m.id] = true;
+          });
+          return next;
+        });
       },
-      (err) => {
-        console.error("menus onSnapshot error:", err);
-        setMenus([]);
+      () => {
+        // ✅ 구독 실패해도 사이드바가 앱을 죽이지 않도록 무시 처리
       }
     );
 
     return () => unsub();
-  }, []);
+  }, [db]);
 
-  /** 최상위(부모) 메뉴: parentId가 비어있는 것들 */
-  const topMenus = useMemo(() => {
+  // ✅ 노출 필터(활성 + adminOnly 처리)
+  const visibleMenus = useMemo(() => {
     return menus
-      .filter((m) => !m.parentKey)
-      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  }, [menus]);
+      .filter((m) => m.isActive)
+      .filter((m) => (m.adminOnly ? isAdmin : true));
+  }, [menus, isAdmin]);
 
-  /** 부모별 자식 메뉴 그룹핑 */
+  // ✅ 트리 구성(parentId -> children)
   const childrenByParent = useMemo(() => {
-    const map = new Map<string, MenuNode[]>();
-    for (const m of menus) {
-      if (!m.parentKey) continue;
-      const arr = map.get(m.parentKey) ?? [];
-      arr.push(m);
-      map.set(m.parentKey, arr);
-    }
+    const map = new Map<string | null, MenuDoc[]>();
 
-    // 각 그룹 정렬
-    for (const [k, arr] of map.entries()) {
-      arr.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-      map.set(k, arr);
-    }
+    visibleMenus.forEach((m) => {
+      const key = m.parentId ?? null;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(m);
+    });
 
+    map.forEach((arr) => arr.sort((a, b) => a.order - b.order));
     return map;
-  }, [menus]);
+  }, [visibleMenus]);
 
-  /** hover된 부모에 대한 "기능(leaf) 메뉴"만 추출 */
-  const hoverLeafChildren = useMemo(() => {
-    if (!hoverParentId) return [];
-    const raw = childrenByParent.get(hoverParentId) ?? [];
+  const toggle = (id: string) => setExpanded((p) => ({ ...p, [id]: !(p[id] ?? false) }));
 
-    // ✅ 요구사항: "기능페이지가 존재하는 메뉴"만 옆에 보이게
-    return raw.filter((c) => c.isLeaf);
-  }, [childrenByParent, hoverParentId]);
-
-  /** hover open */
-  const openPanel = (parentId: string) => {
-    // 기존 닫기 타이머 제거
+  /**
+   * ✅ hover 패널 열기
+   * - 부모 메뉴 DOM의 위치를 기준으로 패널 top을 계산합니다.
+   */
+  const openHoverPanel = (menuId: string, el: HTMLElement | null) => {
+    // ✅ 닫기 타이머가 걸려있으면 취소
     if (closeTimerRef.current) {
       window.clearTimeout(closeTimerRef.current);
       closeTimerRef.current = null;
     }
-    setHoverParentId(parentId);
+
+    setHoverParentId(menuId);
+
+    // ✅ 패널 top 위치 계산(컨테이너 기준)
+    const container = containerRef.current;
+    if (container && el) {
+      const cRect = container.getBoundingClientRect();
+      const eRect = el.getBoundingClientRect();
+      // 컨테이너 상단 대비 현재 메뉴 row의 top
+      setPanelTop(eRect.top - cRect.top);
+    } else {
+      setPanelTop(0);
+    }
   };
 
-  /** hover close (약간 딜레이로 깜빡임 방지) */
-  const scheduleClosePanel = () => {
+  /**
+   * ✅ hover 패널 닫기 예약(딜레이로 깜빡임 방지)
+   */
+  const scheduleCloseHoverPanel = () => {
     if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
     closeTimerRef.current = window.setTimeout(() => {
       setHoverParentId(null);
@@ -147,95 +193,126 @@ export default function ContentsMenuLinks() {
     }, 120);
   };
 
-  return (
-    /**
-     * ✅ Sidebar 내부에서 relative로 잡아야
-     *    오른쪽 "옆 패널"을 absolute로 정확히 붙일 수 있습니다.
-     */
-    <div className="relative">
-      {/* ====== 부모(최상위) 메뉴 ====== */}
+  /**
+   * ✅ hover된 부모의 "직계 자식" 중 기능 메뉴(hasPage=true)만 추출
+   */
+  const hoverLeafChildren = useMemo(() => {
+    if (!hoverParentId) return [];
+    const kids = childrenByParent.get(hoverParentId) ?? [];
+    return kids.filter((m) => m.hasPage && !!m.path);
+  }, [childrenByParent, hoverParentId]);
+
+  const renderNode = (parentId: string | null, depth: number) => {
+    const kids = childrenByParent.get(parentId) ?? [];
+    if (kids.length === 0) return null;
+
+    return (
       <div className="space-y-1">
-        {topMenus.map((m) => {
-          // 최상위 자체가 기능 페이지를 가지는 경우도 있을 수 있으므로 처리
-          const isTopLeaf = m.isLeaf;
-
-          // hover 시 옆패널을 띄우는 대상은 "카테고리(또는 자식이 있는 부모)" 위주
+        {kids.map((m) => {
           const hasChildren = (childrenByParent.get(m.id) ?? []).length > 0;
+          const isOpen = expanded[m.id] ?? false;
 
-          // UI 텍스트
-          const label = m.label ?? m.englishName ?? "메뉴";
+          // ✅ 들여쓰기(기존 디자인 크게 변경하지 않게 padding만 조절)
+          const padLeft = 12 + depth * 12;
 
-          // ✅ 최상위에 기능 페이지가 있으면 클릭 링크 제공
-          if (isTopLeaf) {
+          /**
+           * ✅ 카테고리(페이지 없음): 버튼(펼침/접힘)
+           * + 추가: 마우스오버 시 오른쪽 패널 오픈
+           */
+          if (!m.hasPage) {
             return (
-              <Link
+              <div
                 key={m.id}
-                href={m.link}
-                className="block rounded px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-                title={label}
+                onMouseEnter={(e) => openHoverPanel(m.id, e.currentTarget as unknown as HTMLElement)}
+                onMouseLeave={scheduleCloseHoverPanel}
               >
-                {label}
-              </Link>
+                <button
+                  type="button"
+                  onClick={() => toggle(m.id)}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
+                  style={{ paddingLeft: padLeft }}
+                  title="카테고리"
+                >
+                  <span className="truncate">{m.name}</span>
+                  <span className="text-xs opacity-70">
+                    {hasChildren ? (isOpen ? "▾" : "▸") : ""}
+                  </span>
+                </button>
+
+                {hasChildren && isOpen ? (
+                  <div className="mt-1">{renderNode(m.id, depth + 1)}</div>
+                ) : null}
+              </div>
             );
           }
 
-          // ✅ 카테고리(기능 없음): hover 대상
+          /**
+           * ✅ 기능(페이지 있음): Link
+           * + (선택) 기능 메뉴도 하위가 있다면 hover 패널을 띄울 수 있도록 동일 처리
+           *   - 원치 않으면 아래 onMouseEnter/Leave를 제거하시면 됩니다.
+           */
           return (
             <div
               key={m.id}
-              onMouseEnter={() => openPanel(m.id)}
-              onMouseLeave={scheduleClosePanel}
-              className="block rounded px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800 cursor-default"
-              title={label}
+              onMouseEnter={(e) => {
+                // 기능 메뉴인데 자식이 있다면(다음 단계가 있다면) 패널로 보여줄 가치가 있어 오픈
+                if (hasChildren) openHoverPanel(m.id, e.currentTarget as unknown as HTMLElement);
+              }}
+              onMouseLeave={scheduleCloseHoverPanel}
             >
-              {/* 카테고리 표시 */}
-              <div className="flex items-center justify-between">
-                <span className="truncate">{label}</span>
+              <Link
+                href={m.path || "#"}
+                className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
+                style={{ paddingLeft: padLeft }}
+                title={m.path}
+              >
+                {m.name}
+              </Link>
 
-                {/* 자식이 있으면 ▶ 표시 */}
-                {hasChildren ? (
-                  <span className="text-xs text-gray-400 dark:text-gray-500">
-                    ▶
-                  </span>
-                ) : null}
-              </div>
+              {/* ✅ 기존 옵션 유지: 기능 메뉴 아래에도 하위가 있을 수 있으면 펼침 표시 가능 */}
+              {hasChildren && isOpen ? (
+                <div className="mt-1">{renderNode(m.id, depth + 1)}</div>
+              ) : null}
             </div>
           );
         })}
       </div>
+    );
+  };
 
-      {/* ====== 오른쪽 옆 패널(hover 시) ====== */}
+  return (
+    /**
+     * ✅ "옆 패널"을 absolute로 붙이기 위해 컨테이너를 relative로 잡습니다.
+     * - 기존 렌더 구조를 해치지 않기 위해 wrapper만 추가합니다.
+     */
+    <div ref={containerRef} className="relative">
+      {renderNode(null, 0)}
+
+      {/* ✅ hover 옆 패널: 기능 메뉴가 있을 때만 표시 */}
       {hoverParentId && hoverLeafChildren.length > 0 ? (
         <div
-          /**
-           * ✅ 부모 메뉴 리스트 오른쪽에 붙는 패널
-           * - left-full: 부모 컨테이너의 오른쪽 바깥
-           * - ml-2: 간격
-           */
-          className="absolute top-0 left-full ml-2 w-56 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg"
+          className="absolute left-full ml-2 w-56 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg"
+          style={{ top: panelTop }}
           onMouseEnter={() => {
-            // 패널 위에 올라오면 닫기 예약 해제
+            // ✅ 패널 위로 마우스가 올라오면 닫기 예약 취소
             if (closeTimerRef.current) {
               window.clearTimeout(closeTimerRef.current);
               closeTimerRef.current = null;
             }
           }}
-          onMouseLeave={scheduleClosePanel}
+          onMouseLeave={scheduleCloseHoverPanel}
         >
           <div className="p-2 space-y-1">
-            {hoverLeafChildren.map((c) => {
-              const label = c.label ?? c.englishName ?? "기능";
-              return (
-                <Link
-                  key={c.id}
-                  href={c.link}
-                  className="block rounded px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-                  title={label}
-                >
-                  {label}
-                </Link>
-              );
-            })}
+            {hoverLeafChildren.map((c) => (
+              <Link
+                key={c.id}
+                href={c.path || "#"}
+                className="block rounded px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
+                title={c.path}
+              >
+                {c.name}
+              </Link>
+            ))}
           </div>
         </div>
       ) : null}
