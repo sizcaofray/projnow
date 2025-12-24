@@ -1,16 +1,19 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 
 /**
- * eContents 생성 UI 로직(삽입용)
+ * app/contents/econtents/page.tsx
+ *
+ * ✅ 기능
  * - DOCX 우선, 없으면 PDF
- * - 템플릿 XLSX를 함께 업로드
+ * - 템플릿 XLSX 함께 업로드
  * - API 호출 후 생성된 XLSX 다운로드
  *
- * 주의:
- * - 사용자님 요청대로 "마크업/디자인 변경 없이" 로직만 추가하도록 구성합니다.
- * - 실제 input/button은 기존 UI 컴포넌트를 그대로 사용하고, onChange/onClick만 연결하세요.
+ * ✅ 보강(로직만)
+ * 1) DOCX 선택 시 PDF 자동 초기화(혼동 방지)
+ * 2) 같은 파일 재선택 시에도 onChange가 동작하도록 input value 초기화(ref)
+ * 3) 서버가 Content-Disposition으로 파일명을 주면 그 파일명으로 다운로드
  */
 export default function EContentsPage() {
   // 업로드 파일 상태
@@ -22,7 +25,12 @@ export default function EContentsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string>("");
 
-  // DOCX 우선 규칙에 따른 실제 입력 파일 표시용(선택)
+  // ✅ input ref (같은 파일 재선택 가능하도록 value reset)
+  const docxInputRef = useRef<HTMLInputElement | null>(null);
+  const pdfInputRef = useRef<HTMLInputElement | null>(null);
+  const templateInputRef = useRef<HTMLInputElement | null>(null);
+
+  // DOCX 우선 규칙에 따른 실제 입력 파일 표시용
   const activeInputLabel = useMemo(() => {
     if (docx) return `DOCX: ${docx.name}`;
     if (pdf) return `PDF: ${pdf.name}`;
@@ -31,23 +39,31 @@ export default function EContentsPage() {
 
   /**
    * DOCX 파일 선택 핸들러
-   * - DOCX가 선택되면 PDF는 보조 입력이므로 그대로 둬도 되지만,
-   *   혼동 방지를 위해 PDF를 비우고 싶으면 setPdf(null)을 추가하세요.
+   * - ✅ DOCX 선택 시 PDF는 자동 초기화(혼동 방지)
+   * - ✅ 같은 파일 재선택 가능하도록 input value 비움
    */
   const onPickDocx = (f: File | null) => {
     setErrorMsg("");
     setDocx(f);
-    // 필요 시: docx 선택 시 pdf는 무시되므로 초기화
-    // setPdf(null);
+
+    // ✅ DOCX가 우선이므로, PDF는 자동 초기화
+    if (f) setPdf(null);
+
+    // ✅ 같은 파일을 다시 선택할 때 change가 안 뜨는 문제 방지
+    if (docxInputRef.current) docxInputRef.current.value = "";
+    if (pdfInputRef.current) pdfInputRef.current.value = "";
   };
 
   /**
    * PDF 파일 선택 핸들러
    * - DOCX가 없을 때만 사용되는 fallback
+   * - ✅ PDF 선택 시 DOCX가 이미 있으면 그대로 두되, 안내 라벨은 DOCX가 우선
    */
   const onPickPdf = (f: File | null) => {
     setErrorMsg("");
     setPdf(f);
+
+    if (pdfInputRef.current) pdfInputRef.current.value = "";
   };
 
   /**
@@ -56,6 +72,25 @@ export default function EContentsPage() {
   const onPickTemplate = (f: File | null) => {
     setErrorMsg("");
     setTemplate(f);
+
+    if (templateInputRef.current) templateInputRef.current.value = "";
+  };
+
+  /**
+   * Content-Disposition에서 파일명 파싱
+   */
+  const getFilenameFromDisposition = (disposition: string | null) => {
+    if (!disposition) return null;
+
+    // 예: attachment; filename="xxx.xlsx"
+    const m1 = disposition.match(/filename="([^"]+)"/i);
+    if (m1?.[1]) return m1[1];
+
+    // 예: attachment; filename=xxx.xlsx
+    const m2 = disposition.match(/filename=([^;]+)/i);
+    if (m2?.[1]) return m2[1].trim();
+
+    return null;
   };
 
   /**
@@ -80,10 +115,9 @@ export default function EContentsPage() {
       setIsLoading(true);
 
       const fd = new FormData();
-      // 템플릿은 항상 포함
       fd.append("template", template);
 
-      // DOCX 우선
+      // ✅ DOCX 우선
       if (docx) fd.append("docx", docx);
       else if (pdf) fd.append("pdf", pdf);
 
@@ -93,18 +127,20 @@ export default function EContentsPage() {
       });
 
       if (!res.ok) {
-        // 서버 에러 메시지 표시
         const data = await res.json().catch(() => null);
         throw new Error(data?.message ?? "생성 요청에 실패했습니다.");
       }
 
-      // 응답 XLSX 다운로드
+      // ✅ 서버가 내려주는 파일명 우선 적용
+      const dispo = res.headers.get("content-disposition");
+      const serverFilename = getFilenameFromDisposition(dispo);
+
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
 
       const a = document.createElement("a");
       a.href = url;
-      a.download = "econtents_generated.xlsx";
+      a.download = serverFilename || "econtents_generated.xlsx";
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -118,30 +154,29 @@ export default function EContentsPage() {
   };
 
   /**
-   * 아래 return 영역은 "기존 마크업"을 유지해야 하므로,
-   * 현재 파일의 UI에 맞춰 input/button에 핸들러만 연결하세요.
-   *
-   * 예)
-   * <input type="file" accept=".docx" onChange={(e)=>onPickDocx(e.target.files?.[0] ?? null)} />
-   * <button onClick={onGenerate} disabled={isLoading}>생성</button>
+   * ✅ 아래 return 영역은 사용자님 기존 마크업을 유지하셔야 합니다.
+   * 현재 return은 예시이므로, 실제 UI 컴포넌트에 ref/onChange/onClick만 연결하세요.
    */
   return (
     <div>
-      {/* ⚠️ 이 return은 예시입니다. 사용자님 기존 마크업을 유지하셔야 합니다. */}
       <div style={{ marginBottom: 8 }}>선택된 입력: {activeInputLabel}</div>
       {errorMsg && <div style={{ color: "red", marginBottom: 8 }}>{errorMsg}</div>}
+
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <input
+          ref={docxInputRef}
           type="file"
           accept=".docx"
           onChange={(e) => onPickDocx(e.target.files?.[0] ?? null)}
         />
         <input
+          ref={pdfInputRef}
           type="file"
           accept=".pdf"
           onChange={(e) => onPickPdf(e.target.files?.[0] ?? null)}
         />
         <input
+          ref={templateInputRef}
           type="file"
           accept=".xlsx"
           onChange={(e) => onPickTemplate(e.target.files?.[0] ?? null)}
