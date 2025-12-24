@@ -3,22 +3,16 @@
 /**
  * components/ContentsMenuLinks.tsx
  *
- * ✅ 역할
- * - Firestore "menus" 컬렉션을 onSnapshot으로 실시간 구독
- * - isActive=true 만 노출
- * - adminOnly=true 는 관리자만 노출
- * - hasPage=false(카테고리)면 링크 없이 표시
- * - hasPage=true(기능)면 path로 Link 이동
+ * ✅ 변경(빌드 에러 해결)
+ * - isAdmin을 필수 props로 받지 않고 optional로 변경
+ * - 기본값 false로 처리
+ * - layout.tsx에서 props 누락되어도 빌드가 깨지지 않음
  *
- * ✅ 요구사항(이번 수정)
- * - "부모(카테고리) 메뉴"에 마우스오버 시,
- *   오버된 메뉴 옆(오른쪽)에 "기능이 있는 메뉴(hasPage=true)"만 표시하는 패널을 노출
- *
- * ✅ 버그/현상 수정
- * - 이전 구현은 "좌측 트리(펼침)" + "오른쪽 호버 패널"이 동시에 동작하여
- *   하위 메뉴가 좌측에도 생기는 현상이 있었습니다.
- * - 이번 수정으로: 카테고리는 좌측에서 하위를 펼치지 않고(트리 렌더 제거),
- *   오른쪽 호버 패널에서만 하위 기능 메뉴를 보여줍니다.
+ * ✅ 기능
+ * - Firestore menus 실시간 구독
+ * - isActive만 노출
+ * - adminOnly는 isAdmin일 때만 노출
+ * - 카테고리(hasPage=false)는 hover 패널로만 하위 기능 메뉴 노출(좌측 트리 확장 없음)
  */
 
 import Link from "next/link";
@@ -42,8 +36,9 @@ type MenuDoc = {
 
 const COL = "menus";
 
-export default function ContentsMenuLinks(props: { isAdmin: boolean }) {
-  const { isAdmin } = props;
+export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
+  // ✅ props가 없어도 동작하도록 기본값 처리
+  const isAdmin = Boolean(props?.isAdmin);
 
   const db = useMemo(() => {
     try {
@@ -54,7 +49,7 @@ export default function ContentsMenuLinks(props: { isAdmin: boolean }) {
   }, []);
 
   const [menus, setMenus] = useState<MenuDoc[]>([]);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({}); // (유지) 다른 곳에서 쓰고 있을 수 있어 유지
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({}); // 다른 코드 영향 최소화 차원 유지
   const [hoverParentId, setHoverParentId] = useState<string | null>(null);
   const [panelTop, setPanelTop] = useState(0);
 
@@ -95,7 +90,7 @@ export default function ContentsMenuLinks(props: { isAdmin: boolean }) {
 
         setMenus(rows);
 
-        // ✅ 기존 expanded 초기화 로직이 있었다면 유지(다른 기능 영향 최소)
+        // ✅ 기존 expanded 초기화 로직 유지(실사용은 안 해도 영향 최소)
         setExpanded((prev) => {
           if (Object.keys(prev).length > 0) return prev;
 
@@ -114,7 +109,7 @@ export default function ContentsMenuLinks(props: { isAdmin: boolean }) {
         });
       },
       () => {
-        // ✅ 구독 실패해도 사이드바가 앱을 죽이지 않도록 무시
+        // 구독 실패 시 무시(앱 중단 방지)
       }
     );
 
@@ -128,7 +123,6 @@ export default function ContentsMenuLinks(props: { isAdmin: boolean }) {
       .filter((m) => (m.adminOnly ? isAdmin : true));
   }, [menus, isAdmin]);
 
-  // ✅ 트리 구성(parentId -> children)
   const childrenByParent = useMemo(() => {
     const map = new Map<string | null, MenuDoc[]>();
     visibleMenus.forEach((m) => {
@@ -140,10 +134,6 @@ export default function ContentsMenuLinks(props: { isAdmin: boolean }) {
     return map;
   }, [visibleMenus]);
 
-  /**
-   * ✅ hover 패널 열기
-   * - 부모 메뉴 DOM의 위치를 기준으로 패널 top을 계산합니다.
-   */
   const openHoverPanel = (menuId: string, el: HTMLElement | null) => {
     if (closeTimerRef.current) {
       window.clearTimeout(closeTimerRef.current);
@@ -162,9 +152,6 @@ export default function ContentsMenuLinks(props: { isAdmin: boolean }) {
     }
   };
 
-  /**
-   * ✅ hover 패널 닫기 예약(딜레이로 깜빡임 방지)
-   */
   const scheduleCloseHoverPanel = () => {
     if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
     closeTimerRef.current = window.setTimeout(() => {
@@ -173,9 +160,6 @@ export default function ContentsMenuLinks(props: { isAdmin: boolean }) {
     }, 120);
   };
 
-  /**
-   * ✅ hover된 부모의 "직계 자식" 중 기능 메뉴(hasPage=true)만 추출
-   */
   const hoverLeafChildren = useMemo(() => {
     if (!hoverParentId) return [];
     const kids = childrenByParent.get(hoverParentId) ?? [];
@@ -192,11 +176,7 @@ export default function ContentsMenuLinks(props: { isAdmin: boolean }) {
           const hasChildren = (childrenByParent.get(m.id) ?? []).length > 0;
           const padLeft = 12 + depth * 12;
 
-          /**
-           * ✅ 카테고리(페이지 없음)
-           * - (핵심 수정) 좌측에서 하위를 "펼치지 않음"
-           * - 호버로만 오른쪽 패널을 띄워서 하위 기능 메뉴를 보여줌
-           */
+          // ✅ 카테고리: 좌측 트리 확장 없음, hover 패널만
           if (!m.hasPage) {
             return (
               <div
@@ -206,24 +186,18 @@ export default function ContentsMenuLinks(props: { isAdmin: boolean }) {
               >
                 <button
                   type="button"
-                  // ✅ 좌측 트리 펼침/접힘은 제거(원치 않는 좌측 하위 생성 방지)
                   className="w-full flex items-center justify-between px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
                   style={{ paddingLeft: padLeft }}
                   title="카테고리"
                 >
                   <span className="truncate">{m.name}</span>
-                  {/* ✅ 자식이 있으면 패널 존재를 암시하는 아이콘만 표시 */}
                   <span className="text-xs opacity-70">{hasChildren ? "▸" : ""}</span>
                 </button>
               </div>
             );
           }
 
-          /**
-           * ✅ 기능(페이지 있음)
-           * - Link 이동
-           * - (선택) 기능 메뉴가 자식을 갖는 경우에만 hover 패널을 열도록 유지
-           */
+          // ✅ 기능: Link 이동
           return (
             <div
               key={m.id}
@@ -249,10 +223,8 @@ export default function ContentsMenuLinks(props: { isAdmin: boolean }) {
 
   return (
     <div ref={containerRef} className="relative">
-      {/* ✅ 좌측 메뉴 리스트 */}
       {renderNode(null, 0)}
 
-      {/* ✅ 오른쪽 hover 패널 */}
       {hoverParentId && hoverLeafChildren.length > 0 ? (
         <div
           className="absolute left-full ml-2 w-56 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg"
