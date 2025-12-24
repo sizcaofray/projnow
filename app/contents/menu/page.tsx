@@ -3,8 +3,17 @@
 /**
  * app/contents/menu/page.tsx
  *
- * ✅ 변경사항
- * - (요구사항 2) 목록 Row의 "같은레벨 추가 / 하위메뉴" 버튼 제거
+ * ✅ 변경사항(이번 수정)
+ * - (버그 수정) "기능 메뉴가 목록에서 안 보이는" 케이스:
+ *   초기 expanded가 최상위만 true라서, 중간 카테고리(또는 메뉴관리)가 접힌 상태면
+ *   그 하위 기능(hasPage=true) 메뉴가 flatVisible에 포함되지 않아 리스트에서 사라져 보였습니다.
+ *
+ * ✅ 해결
+ * - 최초 로드 1회에 한해: "자식이 있는 모든 부모 메뉴"를 expanded=true로 자동 펼침 처리
+ * - TreeRow 토글 아이콘도 expanded 상태(▾/▸)에 맞게 표시되도록 isOpen 전달
+ *
+ * ✅ 기존 요구사항 유지
+ * - 목록 Row의 "같은레벨 추가 / 하위메뉴" 버튼 없음
  * - 계층 지정은 "상위 메뉴(소속)" select로만 처리
  */
 
@@ -179,10 +188,12 @@ export default function MenuManagePage() {
 
         const hasPage = Boolean(v.hasPage ?? false);
         const slug = String(v.slug ?? "");
-        const path = hasPage && slug ? String(v.path ?? buildPath(slug)) : String(v.path ?? "");
+        const path =
+          hasPage && slug ? String(v.path ?? buildPath(slug)) : String(v.path ?? "");
 
         const parentIdRaw = v.parentId ?? null;
-        const parentId = parentIdRaw === "" ? null : (parentIdRaw as string | null);
+        const parentId =
+          parentIdRaw === "" ? null : (parentIdRaw as string | null);
 
         return {
           id: d.id,
@@ -200,12 +211,31 @@ export default function MenuManagePage() {
 
       setMenus(rows);
 
+      /**
+       * ✅ [핵심 수정]
+       * - 최초 1회만: "자식이 있는 모든 부모 메뉴"를 expanded=true로 자동 펼침
+       * - 그래야 중간 카테고리가 접혀서 하위 기능 메뉴가 리스트에서 사라지는 문제가 없습니다.
+       */
       setExpanded((prev) => {
         if (Object.keys(prev).length > 0) return prev;
+
+        // parentId 기준으로 "부모가 된 적 있는 id" 모으기
+        const parentSet = new Set<string>();
+        rows.forEach((m) => {
+          if (m.parentId) parentSet.add(m.parentId);
+        });
+
         const next: Record<string, boolean> = {};
+        // 자식이 있는 부모는 전부 펼침
+        parentSet.forEach((pid) => {
+          next[pid] = true;
+        });
+
+        // 최상위도 혹시 없을 수 있으니 안전하게 true(이미 위 parentSet에서 커버되더라도 무해)
         rows.forEach((m) => {
           if (m.parentId === null) next[m.id] = true;
         });
+
         return next;
       });
     } catch (e: any) {
@@ -232,15 +262,17 @@ export default function MenuManagePage() {
   }, [menus]);
 
   const flatVisible = useMemo(() => {
-    const out: Array<MenuDoc & { depth: number; hasChildren: boolean }> = [];
+    const out: Array<MenuDoc & { depth: number; hasChildren: boolean; isOpen: boolean }> = [];
 
     const walk = (parentId: string | null, depth: number) => {
       const kids = childrenByParent.get(parentId) ?? [];
       for (const node of kids) {
         const hasChildren = (childrenByParent.get(node.id) ?? []).length > 0;
-        out.push({ ...node, depth, hasChildren });
-
         const isOpen = expanded[node.id] ?? false;
+
+        out.push({ ...node, depth, hasChildren, isOpen });
+
+        // ✅ 펼쳐진 노드만 하위 렌더
         if (hasChildren && isOpen) walk(node.id, depth + 1);
       }
     };
@@ -262,7 +294,8 @@ export default function MenuManagePage() {
   const validate = (payload: { name: string; hasPage: boolean; slug: string }) => {
     if (!payload.name.trim()) return "메뉴명을 입력해주세요.";
     if (payload.hasPage) {
-      if (!payload.slug.trim()) return "기능(페이지 있음) 메뉴는 폴더명(영문)이 필수입니다.";
+      if (!payload.slug.trim())
+        return "기능(페이지 있음) 메뉴는 폴더명(영문)이 필수입니다.";
       if (!SLUG_REGEX.test(payload.slug)) {
         return "폴더명은 소문자 영문/숫자/_ 만 가능합니다. (공백/특수문자 불가)";
       }
@@ -360,7 +393,7 @@ export default function MenuManagePage() {
       let finalPath = "";
 
       if (finalHasPage) {
-        finalSlug = editOriginalHasPage ? editOriginalSlug : normalizedSlug; // ✅ 카테고리→기능 전환 시 최초 설정
+        finalSlug = editOriginalHasPage ? editOriginalSlug : normalizedSlug;
         finalPath = buildPath(finalSlug);
       }
 
@@ -462,7 +495,10 @@ export default function MenuManagePage() {
 
         if (m.order !== nextOrder) {
           updates.push(
-            updateDoc(doc(db, COL, m.id), { order: nextOrder, updatedAt: serverTimestamp() }) as unknown as Promise<void>
+            updateDoc(doc(db, COL, m.id), {
+              order: nextOrder,
+              updatedAt: serverTimestamp(),
+            }) as unknown as Promise<void>
           );
           return { ...m, order: nextOrder };
         }
@@ -782,7 +818,7 @@ export default function MenuManagePage() {
 
 /** ✅ 트리 Row(드래그 가능) - 버튼 최소화(수정/삭제만) */
 function TreeRow(props: {
-  m: MenuDoc & { depth: number; hasChildren: boolean };
+  m: MenuDoc & { depth: number; hasChildren: boolean; isOpen: boolean };
   canWrite: boolean;
   onToggle: () => void;
   onEdit: () => void;
@@ -818,7 +854,8 @@ function TreeRow(props: {
           className="h-7 w-7 rounded border text-xs disabled:opacity-40"
           title={m.hasChildren ? "펼침/접힘" : "하위 없음"}
         >
-          {m.hasChildren ? "▾" : "·"}
+          {/* ✅ expanded 상태에 맞게 아이콘 표시 */}
+          {m.hasChildren ? (m.isOpen ? "▾" : "▸") : "·"}
         </button>
 
         <button
