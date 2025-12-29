@@ -5,7 +5,7 @@ import path from "path";
 import fs from "fs/promises";
 import * as ExcelJS from "exceljs"; // ✅ default import 금지
 import mammoth from "mammoth";
-import { load } from "cheerio"; // ✅ cheerio는 default import 금지 (named import)
+import { load } from "cheerio"; // ✅ default import 금지
 
 export const runtime = "nodejs";
 
@@ -36,17 +36,18 @@ async function extractHtmlFromDocx(buffer: Buffer): Promise<string> {
  * PDF: 텍스트 추출 (✅ Turbopack/ESM 호환 위해 동적 import)
  * ---------------------------- */
 async function extractTextFromPdf(buffer: Buffer): Promise<string> {
-  // ✅ pdf-parse는 환경에 따라 default export가 없거나 형태가 달라 Turbopack에서 깨질 수 있어 동적 import로 우회
-  const mod: any = await import("pdf-parse");
+  // ✅ pdf-parse는 환경에 따라 export 형태가 달라 Turbopack에서 깨질 수 있어 동적 import로 우회
+  const mod: unknown = await import("pdf-parse");
 
-  // 가능한 형태를 모두 커버 (default / named / module 자체)
-  const pdfParseFn: any = mod?.default ?? mod?.pdfParse ?? mod;
+  // ✅ 타입 안전: 여러 export 형태 대응
+  const m = mod as { default?: unknown; pdfParse?: unknown };
+  const pdfParseFn = (m.default ?? m.pdfParse ?? mod) as unknown;
 
   if (typeof pdfParseFn !== "function") {
     throw new Error("pdf-parse 모듈 로딩 실패: export 형태를 확인할 수 없습니다.");
   }
 
-  const data = await pdfParseFn(buffer);
+  const data = await (pdfParseFn as (b: Buffer) => Promise<{ text?: string }>)(buffer);
   return data?.text ?? "";
 }
 
@@ -108,20 +109,27 @@ function extractVisitsFromDocxHtml(docxHtml: string): string[] {
   const scheduleNodes = $(":contains('Schedule of Assessments'), :contains('SCHEDULE OF ASSESSMENTS')");
   if (!scheduleNodes || scheduleNodes.length === 0) return [];
 
-  let table: any = null;
-  scheduleNodes.each((_, el) => {
+  let table: ReturnType<typeof $> | null = null;
+
+  // ✅ idx 타입 명시 (noImplicitAny 대응)
+  scheduleNodes.each((idx: number, el: unknown) => {
     if (table) return;
-    const nextTable = $(el).nextAll("table").first();
+
+    // cheerio el은 any에 가까우나, 엄격 TS에서는 unknown 처리 후 사용
+    const nextTable = $(el as any).nextAll("table").first();
     if (nextTable && nextTable.length > 0) table = nextTable;
   });
+
   if (!table) return [];
 
   const headerTds = table.find("tr").first().find("td,th");
   if (!headerTds || headerTds.length === 0) return [];
 
   const headers: string[] = [];
-  headerTds.each((_, td) => {
-    const t = $(td).text().replace(/\s+/g, " ").trim();
+
+  // ✅ 여기서 문제였던 '_'에 타입 명시
+  headerTds.each((idx: number, td: unknown) => {
+    const t = $(td as any).text().replace(/\s+/g, " ").trim();
     headers.push(t);
   });
 
@@ -208,10 +216,7 @@ function updateVisitSheetFromVisits(ws: ExcelJS.Worksheet, visits: string[]) {
 /* -----------------------------
  * Navigation 업데이트 시도(가능할 때만)
  * ---------------------------- */
-function tryUpdateNavigationFromDocxHtml(
-  workbook: ExcelJS.Workbook,
-  docxHtml: string
-) {
+function tryUpdateNavigationFromDocxHtml(workbook: ExcelJS.Workbook, docxHtml: string) {
   const nav = workbook.getWorksheet("Navigation");
   const formSheet = workbook.getWorksheet("Form");
   if (!nav || !formSheet) return;
@@ -221,12 +226,14 @@ function tryUpdateNavigationFromDocxHtml(
   const scheduleNodes = $(":contains('Schedule of Assessments'), :contains('SCHEDULE OF ASSESSMENTS')");
   if (!scheduleNodes || scheduleNodes.length === 0) return;
 
-  let table: any = null;
-  scheduleNodes.each((_, el) => {
+  let table: ReturnType<typeof $> | null = null;
+
+  scheduleNodes.each((idx: number, el: unknown) => {
     if (table) return;
-    const nextTable = $(el).nextAll("table").first();
+    const nextTable = $(el as any).nextAll("table").first();
     if (nextTable && nextTable.length > 0) table = nextTable;
   });
+
   if (!table) return;
 
   const formNames = new Set<string>();
@@ -249,18 +256,18 @@ function tryUpdateNavigationFromDocxHtml(
   const headerCells = rows.first().find("td,th");
   const visitCount = Math.max(0, headerCells.length - 1);
 
-  rows.slice(1).each((_, tr) => {
-    const cells = $(tr).find("td,th");
+  rows.slice(1).each((idx: number, tr: unknown) => {
+    const cells = $(tr as any).find("td,th");
     if (cells.length < 2) return;
 
-    const rowLabel = $(cells[0]).text().replace(/\s+/g, " ").trim();
+    const rowLabel = $(cells[0] as any).text().replace(/\s+/g, " ").trim();
     if (!formNames.has(rowLabel)) return;
 
     const navRowNumber = navFormRowMap.get(rowLabel);
     if (!navRowNumber) return;
 
     for (let i = 0; i < visitCount; i++) {
-      const cellText = $(cells[i + 1]).text().replace(/\s+/g, " ").trim();
+      const cellText = $(cells[i + 1] as any).text().replace(/\s+/g, " ").trim();
       const hasMark = cellText !== "" && cellText !== "-" && cellText.toUpperCase() !== "NA";
       if (hasMark) {
         nav.getRow(navRowNumber).getCell(3 + i).value = "X";
@@ -306,7 +313,7 @@ export async function POST(req: Request) {
       docxHtml = await extractHtmlFromDocx(fileBuffer);
     } else {
       text = await extractTextFromPdf(fileBuffer);
-      docxHtml = ""; // PDF 표 파싱은 안정성 낮아서 일단 텍스트만 사용
+      docxHtml = "";
     }
 
     const parsed = parseProtocolInfo(text);
@@ -328,6 +335,7 @@ export async function POST(req: Request) {
     const protocolWs = workbook.getWorksheet("Protocol");
     if (!protocolWs) throw new Error("템플릿에서 'Protocol' 시트를 찾지 못했습니다.");
 
+    // 템플릿 기준 Study No(치환 기준)
     const oldStudyNo = String(protocolWs.getCell("B1").value ?? "").trim();
 
     fillProtocolSheetByLabels(protocolWs, {
@@ -338,10 +346,10 @@ export async function POST(req: Request) {
       blankCrfDate,
     });
 
-    // ✅ 2) Form/Module/Navigation/Visit 등 전체 메타(StudyNo) 자동 반영
+    // ✅ 2) 전체 메타(StudyNo) 자동 반영
     replaceStudyNoEverywhere(workbook, oldStudyNo, parsed.studyNo);
 
-    // ✅ 1) DOCX인 경우 방문표 기반 Visit/Navigation 업데이트 시도
+    // ✅ 1) DOCX이면 Visit/Navigation 업데이트 시도
     if (ext === "docx" && docxHtml) {
       const visits = extractVisitsFromDocxHtml(docxHtml);
 
