@@ -3,9 +3,9 @@
 import { NextResponse } from "next/server";
 import path from "path";
 import fs from "fs/promises";
-import * as ExcelJS from "exceljs"; // ✅ default import 금지
+import * as ExcelJS from "exceljs";
 import mammoth from "mammoth";
-import { load } from "cheerio"; // ✅ default import 금지
+import { load, type CheerioAPI, type Cheerio, type AnyNode } from "cheerio";
 
 export const runtime = "nodejs";
 
@@ -33,14 +33,12 @@ async function extractHtmlFromDocx(buffer: Buffer): Promise<string> {
 }
 
 /* -----------------------------
- * PDF: 텍스트 추출 (✅ Turbopack/ESM 호환 위해 동적 import)
+ * PDF: 텍스트 추출 (Turbopack/ESM 호환: 동적 import)
  * ---------------------------- */
 async function extractTextFromPdf(buffer: Buffer): Promise<string> {
-  // ✅ pdf-parse는 환경에 따라 export 형태가 달라 Turbopack에서 깨질 수 있어 동적 import로 우회
   const mod: unknown = await import("pdf-parse");
-
-  // ✅ 타입 안전: 여러 export 형태 대응
   const m = mod as { default?: unknown; pdfParse?: unknown };
+
   const pdfParseFn = (m.default ?? m.pdfParse ?? mod) as unknown;
 
   if (typeof pdfParseFn !== "function") {
@@ -104,20 +102,18 @@ function normalizeDate(dateRaw: string): string {
  * DOCX HTML에서 Schedule of Assessments 표 헤더(Visit) 추출
  * ---------------------------- */
 function extractVisitsFromDocxHtml(docxHtml: string): string[] {
-  const $ = load(docxHtml);
+  const $: CheerioAPI = load(docxHtml);
 
   const scheduleNodes = $(":contains('Schedule of Assessments'), :contains('SCHEDULE OF ASSESSMENTS')");
   if (!scheduleNodes || scheduleNodes.length === 0) return [];
 
-  let table: ReturnType<typeof $> | null = null;
+  // ✅ 여기서 핵심: table 타입을 Cheerio<AnyNode>로 명시 (never 방지)
+  let table: Cheerio<AnyNode> | null = null;
 
-  // ✅ idx 타입 명시 (noImplicitAny 대응)
-  scheduleNodes.each((idx: number, el: unknown) => {
+  scheduleNodes.each((idx: number, el: AnyNode) => {
     if (table) return;
-
-    // cheerio el은 any에 가까우나, 엄격 TS에서는 unknown 처리 후 사용
-    const nextTable = $(el as any).nextAll("table").first();
-    if (nextTable && nextTable.length > 0) table = nextTable;
+    const nextTable = $(el).nextAll("table").first();
+    if (nextTable && nextTable.length > 0) table = nextTable as Cheerio<AnyNode>;
   });
 
   if (!table) return [];
@@ -126,13 +122,12 @@ function extractVisitsFromDocxHtml(docxHtml: string): string[] {
   if (!headerTds || headerTds.length === 0) return [];
 
   const headers: string[] = [];
-
-  // ✅ 여기서 문제였던 '_'에 타입 명시
-  headerTds.each((idx: number, td: unknown) => {
-    const t = $(td as any).text().replace(/\s+/g, " ").trim();
+  headerTds.each((idx: number, td: AnyNode) => {
+    const t = $(td).text().replace(/\s+/g, " ").trim();
     headers.push(t);
   });
 
+  // 보통 첫 컬럼은 항목명(Assessment/Procedure) → 제외
   const visitCandidates = headers.slice(1);
   return visitCandidates.map((v) => v.replace(/\s+/g, " ").trim()).filter(Boolean);
 }
@@ -209,7 +204,7 @@ function updateVisitSheetFromVisits(ws: ExcelJS.Worksheet, visits: string[]) {
   for (let i = 0; i < n; i++) {
     const r = visitRowIndexes[i];
     ws.getRow(r).getCell(2).value = visits[i];
-    ws.getRow(r).getCell(3).value = 101 + i; // 템플릿 규칙 유지(가능한 범위)
+    ws.getRow(r).getCell(3).value = 101 + i;
   }
 }
 
@@ -221,17 +216,17 @@ function tryUpdateNavigationFromDocxHtml(workbook: ExcelJS.Workbook, docxHtml: s
   const formSheet = workbook.getWorksheet("Form");
   if (!nav || !formSheet) return;
 
-  const $ = load(docxHtml);
+  const $: CheerioAPI = load(docxHtml);
 
   const scheduleNodes = $(":contains('Schedule of Assessments'), :contains('SCHEDULE OF ASSESSMENTS')");
   if (!scheduleNodes || scheduleNodes.length === 0) return;
 
-  let table: ReturnType<typeof $> | null = null;
+  let table: Cheerio<AnyNode> | null = null;
 
-  scheduleNodes.each((idx: number, el: unknown) => {
+  scheduleNodes.each((idx: number, el: AnyNode) => {
     if (table) return;
-    const nextTable = $(el as any).nextAll("table").first();
-    if (nextTable && nextTable.length > 0) table = nextTable;
+    const nextTable = $(el).nextAll("table").first();
+    if (nextTable && nextTable.length > 0) table = nextTable as Cheerio<AnyNode>;
   });
 
   if (!table) return;
@@ -256,18 +251,18 @@ function tryUpdateNavigationFromDocxHtml(workbook: ExcelJS.Workbook, docxHtml: s
   const headerCells = rows.first().find("td,th");
   const visitCount = Math.max(0, headerCells.length - 1);
 
-  rows.slice(1).each((idx: number, tr: unknown) => {
-    const cells = $(tr as any).find("td,th");
+  rows.slice(1).each((idx: number, tr: AnyNode) => {
+    const cells = $(tr).find("td,th");
     if (cells.length < 2) return;
 
-    const rowLabel = $(cells[0] as any).text().replace(/\s+/g, " ").trim();
+    const rowLabel = $(cells[0]).text().replace(/\s+/g, " ").trim();
     if (!formNames.has(rowLabel)) return;
 
     const navRowNumber = navFormRowMap.get(rowLabel);
     if (!navRowNumber) return;
 
     for (let i = 0; i < visitCount; i++) {
-      const cellText = $(cells[i + 1] as any).text().replace(/\s+/g, " ").trim();
+      const cellText = $(cells[i + 1]).text().replace(/\s+/g, " ").trim();
       const hasMark = cellText !== "" && cellText !== "-" && cellText.toUpperCase() !== "NA";
       if (hasMark) {
         nav.getRow(navRowNumber).getCell(3 + i).value = "X";
@@ -335,7 +330,6 @@ export async function POST(req: Request) {
     const protocolWs = workbook.getWorksheet("Protocol");
     if (!protocolWs) throw new Error("템플릿에서 'Protocol' 시트를 찾지 못했습니다.");
 
-    // 템플릿 기준 Study No(치환 기준)
     const oldStudyNo = String(protocolWs.getCell("B1").value ?? "").trim();
 
     fillProtocolSheetByLabels(protocolWs, {
@@ -346,18 +340,14 @@ export async function POST(req: Request) {
       blankCrfDate,
     });
 
-    // ✅ 2) 전체 메타(StudyNo) 자동 반영
     replaceStudyNoEverywhere(workbook, oldStudyNo, parsed.studyNo);
 
-    // ✅ 1) DOCX이면 Visit/Navigation 업데이트 시도
     if (ext === "docx" && docxHtml) {
       const visits = extractVisitsFromDocxHtml(docxHtml);
-
       const visitWs = workbook.getWorksheet("Visit");
       if (visitWs && visits.length > 0) {
         updateVisitSheetFromVisits(visitWs, visits);
       }
-
       tryUpdateNavigationFromDocxHtml(workbook, docxHtml);
     }
 
