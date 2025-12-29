@@ -5,7 +5,7 @@ import path from "path";
 import fs from "fs/promises";
 import * as ExcelJS from "exceljs";
 import mammoth from "mammoth";
-import { load, type CheerioAPI, type Cheerio, type AnyNode } from "cheerio";
+import { load, type CheerioAPI, type Cheerio } from "cheerio";
 
 export const runtime = "nodejs";
 
@@ -100,6 +100,8 @@ function normalizeDate(dateRaw: string): string {
 
 /* -----------------------------
  * DOCX HTML에서 Schedule of Assessments 표 헤더(Visit) 추출
+ * - cheerio 버전 의존 타입(AnyNode 등) 제거
+ * - 타입은 unknown으로 받고, 사용할 때만 as any 처리
  * ---------------------------- */
 function extractVisitsFromDocxHtml(docxHtml: string): string[] {
   const $: CheerioAPI = load(docxHtml);
@@ -107,27 +109,26 @@ function extractVisitsFromDocxHtml(docxHtml: string): string[] {
   const scheduleNodes = $(":contains('Schedule of Assessments'), :contains('SCHEDULE OF ASSESSMENTS')");
   if (!scheduleNodes || scheduleNodes.length === 0) return [];
 
-  // ✅ 여기서 핵심: table 타입을 Cheerio<AnyNode>로 명시 (never 방지)
-  let table: Cheerio<AnyNode> | null = null;
+  // ✅ Cheerio<unknown>으로 고정(never 방지)
+  let table: Cheerio<unknown> | null = null;
 
-  scheduleNodes.each((idx: number, el: AnyNode) => {
+  scheduleNodes.each((idx: number, el: unknown) => {
     if (table) return;
-    const nextTable = $(el).nextAll("table").first();
-    if (nextTable && nextTable.length > 0) table = nextTable as Cheerio<AnyNode>;
+    const nextTable = $(el as any).nextAll("table").first();
+    if (nextTable && nextTable.length > 0) table = nextTable as Cheerio<unknown>;
   });
 
   if (!table) return [];
 
-  const headerTds = table.find("tr").first().find("td,th");
+  const headerTds = (table as any).find("tr").first().find("td,th");
   if (!headerTds || headerTds.length === 0) return [];
 
   const headers: string[] = [];
-  headerTds.each((idx: number, td: AnyNode) => {
-    const t = $(td).text().replace(/\s+/g, " ").trim();
+  headerTds.each((idx: number, td: unknown) => {
+    const t = $(td as any).text().replace(/\s+/g, " ").trim();
     headers.push(t);
   });
 
-  // 보통 첫 컬럼은 항목명(Assessment/Procedure) → 제외
   const visitCandidates = headers.slice(1);
   return visitCandidates.map((v) => v.replace(/\s+/g, " ").trim()).filter(Boolean);
 }
@@ -167,11 +168,7 @@ function fillProtocolSheetByLabels(
 /* -----------------------------
  * 템플릿 내 기존 StudyNo -> 새 StudyNo 전체 치환
  * ---------------------------- */
-function replaceStudyNoEverywhere(
-  workbook: ExcelJS.Workbook,
-  oldStudyNo: string,
-  newStudyNo: string
-) {
+function replaceStudyNoEverywhere(workbook: ExcelJS.Workbook, oldStudyNo: string, newStudyNo: string) {
   if (!oldStudyNo || !newStudyNo || oldStudyNo === newStudyNo) return;
 
   workbook.eachSheet((ws) => {
@@ -221,12 +218,12 @@ function tryUpdateNavigationFromDocxHtml(workbook: ExcelJS.Workbook, docxHtml: s
   const scheduleNodes = $(":contains('Schedule of Assessments'), :contains('SCHEDULE OF ASSESSMENTS')");
   if (!scheduleNodes || scheduleNodes.length === 0) return;
 
-  let table: Cheerio<AnyNode> | null = null;
+  let table: Cheerio<unknown> | null = null;
 
-  scheduleNodes.each((idx: number, el: AnyNode) => {
+  scheduleNodes.each((idx: number, el: unknown) => {
     if (table) return;
-    const nextTable = $(el).nextAll("table").first();
-    if (nextTable && nextTable.length > 0) table = nextTable as Cheerio<AnyNode>;
+    const nextTable = $(el as any).nextAll("table").first();
+    if (nextTable && nextTable.length > 0) table = nextTable as Cheerio<unknown>;
   });
 
   if (!table) return;
@@ -245,24 +242,24 @@ function tryUpdateNavigationFromDocxHtml(workbook: ExcelJS.Workbook, docxHtml: s
     if (name) navFormRowMap.set(name, rowNumber);
   });
 
-  const rows = table.find("tr");
+  const rows = (table as any).find("tr");
   if (!rows || rows.length < 2) return;
 
   const headerCells = rows.first().find("td,th");
   const visitCount = Math.max(0, headerCells.length - 1);
 
-  rows.slice(1).each((idx: number, tr: AnyNode) => {
-    const cells = $(tr).find("td,th");
+  rows.slice(1).each((idx: number, tr: unknown) => {
+    const cells = $(tr as any).find("td,th");
     if (cells.length < 2) return;
 
-    const rowLabel = $(cells[0]).text().replace(/\s+/g, " ").trim();
+    const rowLabel = $(cells[0] as any).text().replace(/\s+/g, " ").trim();
     if (!formNames.has(rowLabel)) return;
 
     const navRowNumber = navFormRowMap.get(rowLabel);
     if (!navRowNumber) return;
 
     for (let i = 0; i < visitCount; i++) {
-      const cellText = $(cells[i + 1]).text().replace(/\s+/g, " ").trim();
+      const cellText = $(cells[i + 1] as any).text().replace(/\s+/g, " ").trim();
       const hasMark = cellText !== "" && cellText !== "-" && cellText.toUpperCase() !== "NA";
       if (hasMark) {
         nav.getRow(navRowNumber).getCell(3 + i).value = "X";
@@ -292,10 +289,7 @@ export async function POST(req: Request) {
     const ext = getExt(file.name);
 
     if (ext === "unknown") {
-      return NextResponse.json(
-        { message: "docx 또는 pdf만 업로드 가능합니다." },
-        { status: 400 }
-      );
+      return NextResponse.json({ message: "docx 또는 pdf만 업로드 가능합니다." }, { status: 400 });
     }
 
     const fileBuffer = Buffer.from(await file.arrayBuffer());
@@ -344,10 +338,12 @@ export async function POST(req: Request) {
 
     if (ext === "docx" && docxHtml) {
       const visits = extractVisitsFromDocxHtml(docxHtml);
+
       const visitWs = workbook.getWorksheet("Visit");
       if (visitWs && visits.length > 0) {
         updateVisitSheetFromVisits(visitWs, visits);
       }
+
       tryUpdateNavigationFromDocxHtml(workbook, docxHtml);
     }
 
@@ -362,9 +358,6 @@ export async function POST(req: Request) {
       },
     });
   } catch (e: any) {
-    return NextResponse.json(
-      { message: e?.message ?? "서버 처리 중 오류가 발생했습니다." },
-      { status: 500 }
-    );
+    return NextResponse.json({ message: e?.message ?? "서버 처리 중 오류가 발생했습니다." }, { status: 500 });
   }
 }
