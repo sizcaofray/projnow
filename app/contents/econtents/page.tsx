@@ -5,23 +5,22 @@ import React, { useMemo, useRef, useState } from "react";
 /**
  * app/contents/econtents/page.tsx
  *
- * ✅ 목표
- * - "버튼/드래그 영역/상태"가 명확히 구분되는 수준의 UI로 개선
- * - 기능 로직(업로드 → API 호출 → XLSX 다운로드)은 유지
+ * ✅ 변경 목표(사용자 요구 반영)
+ * - 결과 서식(XLSX)은 서비스에서 "고정" (템플릿 업로드 제거)
+ * - 업로드 대상은 Protocol DOCX(우선) 또는 PDF만
+ * - 업로드 → /api/econtents/generate 호출 → XLSX 다운로드
  *
- * ✅ 기능
- * - Protocol DOCX 우선(없으면 PDF)
- * - eContents 템플릿 XLSX 업로드
- * - /api/econtents/generate 호출 후 XLSX 다운로드
+ * ✅ 유지
+ * - 기존 UI 톤/카드 구조 유지(가능한 최소 변경)
+ * - 드래그앤드롭 / 상태 메시지 / 다운로드 로직 유지
  */
 
-type DropKind = "docx" | "pdf" | "template";
+type DropKind = "docx" | "pdf";
 
 export default function EContentsPage() {
   // 업로드 파일 상태
   const [docx, setDocx] = useState<File | null>(null);
   const [pdf, setPdf] = useState<File | null>(null);
-  const [template, setTemplate] = useState<File | null>(null);
 
   // UI 상태
   const [isLoading, setIsLoading] = useState(false);
@@ -31,7 +30,6 @@ export default function EContentsPage() {
   // ✅ 같은 파일 재선택 시 change가 안 뜨는 경우를 방지하기 위한 ref
   const docxInputRef = useRef<HTMLInputElement | null>(null);
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
-  const templateInputRef = useRef<HTMLInputElement | null>(null);
 
   // ✅ 드래그 상태(카드 하이라이트)
   const [dragOver, setDragOver] = useState<DropKind | null>(null);
@@ -43,8 +41,8 @@ export default function EContentsPage() {
   }, [docx, pdf]);
 
   const canGenerate = useMemo(() => {
-    return Boolean(template && (docx || pdf) && !isLoading);
-  }, [template, docx, pdf, isLoading]);
+    return Boolean((docx || pdf) && !isLoading);
+  }, [docx, pdf, isLoading]);
 
   /** 파일 선택 공통 핸들러 */
   const pickFile = (kind: DropKind, f: File | null) => {
@@ -73,14 +71,6 @@ export default function EContentsPage() {
       if (pdfInputRef.current) pdfInputRef.current.value = "";
       return;
     }
-
-    if (kind === "template") {
-      setTemplate(f);
-
-      // ✅ 같은 파일 재선택 대비
-      if (templateInputRef.current) templateInputRef.current.value = "";
-      return;
-    }
   };
 
   /** 파일 제거 공통 */
@@ -98,8 +88,6 @@ export default function EContentsPage() {
       if (pdfInputRef.current) pdfInputRef.current.value = "";
       return;
     }
-    setTemplate(null);
-    if (templateInputRef.current) templateInputRef.current.value = "";
   };
 
   /** 드래그 이벤트 공통 (브라우저 기본 동작 방지 필수) */
@@ -136,10 +124,6 @@ export default function EContentsPage() {
       setErrorMsg("PDF 영역에는 .pdf 파일만 드롭해 주세요.");
       return;
     }
-    if (kind === "template" && !f.name.toLowerCase().endsWith(".xlsx")) {
-      setErrorMsg("템플릿 영역에는 .xlsx 파일만 드롭해 주세요.");
-      return;
-    }
 
     pickFile(kind, f);
   };
@@ -150,10 +134,6 @@ export default function EContentsPage() {
       setErrorMsg("");
       setInfoMsg("");
 
-      if (!template) {
-        setErrorMsg("eContents 템플릿 XLSX 파일을 업로드해 주세요.");
-        return;
-      }
       if (!docx && !pdf) {
         setErrorMsg("프로토콜 DOCX 또는 PDF 중 하나를 업로드해 주세요. (DOCX 우선)");
         return;
@@ -162,7 +142,6 @@ export default function EContentsPage() {
       setIsLoading(true);
 
       const fd = new FormData();
-      fd.append("template", template);
 
       // ✅ DOCX 우선
       if (docx) fd.append("docx", docx);
@@ -183,6 +162,7 @@ export default function EContentsPage() {
 
       const a = document.createElement("a");
       a.href = url;
+      // ✅ 서버에서 Content-Disposition을 주더라도 안전하게 기본 파일명 지정
       a.download = "econtents_generated.xlsx";
       document.body.appendChild(a);
       a.click();
@@ -215,7 +195,8 @@ export default function EContentsPage() {
       ? "border-white/70 ring-2 ring-white/30"
       : "border-white/15 hover:border-white/25";
 
-    const hint = kind === "docx" ? "또는 여기로 .docx 드래그" : kind === "pdf" ? "또는 여기로 .pdf 드래그" : "또는 여기로 .xlsx 드래그";
+    const hint =
+      kind === "docx" ? "또는 여기로 .docx 드래그" : "또는 여기로 .pdf 드래그";
 
     return (
       <div
@@ -254,7 +235,9 @@ export default function EContentsPage() {
         {/* Dropzone 본체 */}
         <label
           className={`mt-4 block cursor-pointer rounded-xl border border-dashed ${
-            isActive ? "border-white/60 bg-white/10" : "border-white/20 bg-black/10 hover:bg-white/5"
+            isActive
+              ? "border-white/60 bg-white/10"
+              : "border-white/20 bg-black/10 hover:bg-white/5"
           } p-4 transition`}
           title="클릭하여 파일 선택 또는 드래그 앤 드롭"
         >
@@ -275,7 +258,9 @@ export default function EContentsPage() {
                   <span className="font-medium">클릭해서 파일 선택</span>
                 )}
               </div>
-              <div className="mt-1 text-xs text-white/55">{file ? "선택됨" : hint}</div>
+              <div className="mt-1 text-xs text-white/55">
+                {file ? "선택됨" : hint}
+              </div>
             </div>
 
             <span className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white/80">
@@ -289,7 +274,9 @@ export default function EContentsPage() {
               <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-3 py-1 text-xs text-white/80">
                 <span className="max-w-[240px] truncate">{file.name}</span>
                 <span className="text-white/40">•</span>
-                <span className="text-white/60">{Math.ceil(file.size / 1024)} KB</span>
+                <span className="text-white/60">
+                  {Math.ceil(file.size / 1024)} KB
+                </span>
               </span>
             </div>
           ) : null}
@@ -309,6 +296,11 @@ export default function EContentsPage() {
               <span className="ml-2 text-white/40">|</span>
               <span className="ml-2 text-white/60">DOCX 우선, 없으면 PDF</span>
             </div>
+
+            {/* ✅ 고정 서식 안내(오해 방지) */}
+            <div className="mt-2 text-xs text-white/55">
+              ※ 결과 XLSX 서식은 서비스에서 고정되어 있으며, 별도 템플릿 업로드는 필요하지 않습니다.
+            </div>
           </div>
 
           <button
@@ -319,7 +311,7 @@ export default function EContentsPage() {
                 ? "bg-white text-black hover:bg-white/90"
                 : "bg-white/20 text-white/50 cursor-not-allowed"
             }`}
-            title={!canGenerate ? "템플릿 + (DOCX 또는 PDF)를 업로드해 주세요." : "eContents 생성"}
+            title={!canGenerate ? "DOCX 또는 PDF를 업로드해 주세요." : "eContents 생성"}
           >
             {isLoading ? "생성 중..." : "eContents 생성"}
           </button>
@@ -334,8 +326,8 @@ export default function EContentsPage() {
           </div>
           <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
             <div className="text-xs text-white/60">Step 2</div>
-            <div className="mt-1 text-sm font-semibold text-white">템플릿 업로드</div>
-            <div className="mt-1 text-xs text-white/60">예시 eContents XLSX 템플릿을 선택합니다.</div>
+            <div className="mt-1 text-sm font-semibold text-white">서식 자동 적용</div>
+            <div className="mt-1 text-xs text-white/60">서비스 고정 XLSX 서식으로 자동 생성됩니다.</div>
           </div>
           <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
             <div className="text-xs text-white/60">Step 3</div>
@@ -357,7 +349,7 @@ export default function EContentsPage() {
         ) : null}
 
         {/* 업로드 카드 */}
-        <section className="mt-8 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <section className="mt-8 grid grid-cols-1 gap-4 lg:grid-cols-2">
           <DropCard
             kind="docx"
             title="Protocol DOCX"
@@ -375,19 +367,13 @@ export default function EContentsPage() {
             inputRef={pdfInputRef}
             file={pdf}
           />
-          <DropCard
-            kind="template"
-            title="eContents 템플릿 XLSX"
-            subtitle="Protocol / Visit / Form / Navigation 시트가 있는 템플릿"
-            accept=".xlsx"
-            inputRef={templateInputRef}
-            file={template}
-          />
         </section>
 
         {/* 하단 안내 */}
         <div className="mt-6 text-xs text-white/50">
-          ※ 생성이 실패하면 대부분 <span className="text-white/70 font-medium">/api/econtents/generate</span> 서버 라우트 문제입니다.
+          ※ 생성이 실패하면 대부분{" "}
+          <span className="text-white/70 font-medium">/api/econtents/generate</span>{" "}
+          서버 라우트 문제입니다.
         </div>
       </div>
     </main>

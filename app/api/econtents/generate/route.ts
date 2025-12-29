@@ -1,50 +1,139 @@
 // app/api/econtents/generate/route.ts
+
 import { NextResponse } from "next/server";
+import path from "path";
+import fs from "fs/promises";
+import * as ExcelJS from "exceljs"; // ✅ default import 금지
+import mammoth from "mammoth";
+
+export const runtime = "nodejs";
 
 /**
- * eContents 생성 API (MVP)
- * - 클라이언트에서 업로드된 파일(DOCX/PDF)과 템플릿 XLSX를 받아
- * - Protocol/Visit/Form/Navigation 시트를 채운 결과 XLSX를 반환합니다.
- *
- * 주의:
- * - 실제 추출 규칙(섹션 탐지/표 파싱)은 문서마다 다르므로 MVP는 "텍스트 기반"으로 시작합니다.
- * - 고도화 단계에서 Visit/Form을 표 기반으로 정교화합니다.
+ * DOCX 텍스트 추출
  */
+async function extractTextFromDocx(buffer: Buffer): Promise<string> {
+  const result = await mammoth.extractRawText({ buffer });
+  return result.value ?? "";
+}
+
+/**
+ * Protocol 문서에서 핵심 정보 추출
+ */
+function parseProtocolInfo(text: string) {
+  // Study No (DW_DWPxxxxxxxx)
+  const studyNo =
+    text.match(/DW[_-]DWP\d{8}/)?.[0] ?? "";
+
+  // Sponsor
+  const sponsor =
+    text.match(/의뢰자\s*[:\-]?\s*(.+)/)?.[1]?.split("\n")[0]?.trim() ??
+    text.match(/Sponsor\s*[:\-]?\s*(.+)/i)?.[1]?.split("\n")[0]?.trim() ??
+    "";
+
+  // Study Title
+  const title =
+    text.match(/임상시험\s*제목\s*[:\-]?\s*(.+)/)?.[1]?.split("\n")[0]?.trim() ??
+    text.match(/Study\s*Title\s*[:\-]?\s*(.+)/i)?.[1]?.split("\n")[0]?.trim() ??
+    "";
+
+  return { studyNo, sponsor, title };
+}
+
+/**
+ * Protocol 시트 채우기 (라벨 기반)
+ */
+function fillProtocolSheet(
+  ws: ExcelJS.Worksheet,
+  info: { studyNo: string; sponsor: string; title: string }
+) {
+  const map: Record<string, string> = {
+    "Study No": info.studyNo,
+    "Study Title": info.title,
+    "Sponsor": info.sponsor,
+  };
+
+  ws.eachRow((row) => {
+    const label = String(row.getCell(1).value ?? "").trim();
+    if (label && map[label]) {
+      row.getCell(2).value = map[label];
+    }
+  });
+}
+
 export async function POST(req: Request) {
   try {
     const formData = await req.formData();
+    const file = formData.get("docx") as File | null;
 
-    // 업로드 파일들
-    const docxFile = formData.get("docx") as File | null;
-    const pdfFile = formData.get("pdf") as File | null;
-    const templateXlsx = formData.get("template") as File | null;
-
-    if (!templateXlsx) {
-      return NextResponse.json({ ok: false, message: "템플릿 XLSX가 필요합니다." }, { status: 400 });
-    }
-    if (!docxFile && !pdfFile) {
-      return NextResponse.json({ ok: false, message: "DOCX 또는 PDF 중 최소 1개가 필요합니다." }, { status: 400 });
+    if (!file) {
+      return NextResponse.json(
+        { message: "Protocol DOCX 파일이 필요합니다." },
+        { status: 400 }
+      );
     }
 
-    // 템플릿을 버퍼로 읽기
-    const templateBuf = Buffer.from(await templateXlsx.arrayBuffer());
+    if (!file.name.toLowerCase().endsWith(".docx")) {
+      return NextResponse.json(
+        { message: "현재 DOCX 형식만 지원합니다." },
+        { status: 400 }
+      );
+    }
 
-    // 여기서부터 실제 XLSX 채우기 로직이 들어갑니다.
-    // MVP: 템플릿 그대로 반환(연결 확인용) + 향후 프로토콜 메타만 채우는 식으로 단계 확장
+    // DOCX → 텍스트
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const text = await extractTextFromDocx(buffer);
 
-    // TODO(1단계): XLSX 로드 후 Protocol 시트에 meta 채우기
-    // TODO(2단계): Visit/Form/Navigation 자동 생성 및 채우기
+    const info = parseProtocolInfo(text);
 
-    return new NextResponse(templateBuf, {
+    if (!info.studyNo) {
+      return NextResponse.json(
+        {
+          message:
+            "Study No(DW_DWPxxxxxxxx)를 문서에서 찾지 못했습니다.",
+        },
+        { status: 422 }
+      );
+    }
+
+    // 고정 템플릿 로드
+    const templatePath = path.join(
+      process.cwd(),
+      "public",
+      "templates",
+      "econtents_template.xlsx"
+    );
+
+    const templateBuffer = await fs.readFile(templatePath);
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateBuffer);
+
+    // Protocol 시트
+    const protocolWs = workbook.getWorksheet("Protocol");
+    if (!protocolWs) {
+      throw new Error("Protocol 시트를 찾을 수 없습니다.");
+    }
+
+    fillProtocolSheet(protocolWs, info);
+
+    // XLSX 생성
+    const outBuffer = await workbook.xlsx.writeBuffer();
+
+    const filename = `${info.studyNo}_eCRF_contents.xlsx`;
+
+    return new NextResponse(outBuffer, {
       status: 200,
       headers: {
-        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "Content-Disposition": `attachment; filename="econtents_generated.xlsx"`,
+        "Content-Type":
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": `attachment; filename="${encodeURIComponent(
+          filename
+        )}"`,
       },
     });
   } catch (err: any) {
     return NextResponse.json(
-      { ok: false, message: err?.message ?? "서버 처리 중 오류가 발생했습니다." },
+      { message: err?.message ?? "서버 오류" },
       { status: 500 }
     );
   }
