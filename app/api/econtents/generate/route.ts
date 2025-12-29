@@ -213,7 +213,7 @@ function tryUpdateNavigationFromDocxHtml(workbook: ExcelJS.Workbook, docxHtml: s
   const $: CheerioAPI = load(docxHtml);
 
   const scheduleNodes = $(":contains('Schedule of Assessments'), :contains('SCHEDULE OF ASSESSMENTS')");
-  if (!scheduleNodes || scheduleNodes.length === 0) return;
+  if (!scheduleNodes || scheduleNodes.length === 0) return [];
 
   let table: Cheerio<unknown> | null = null;
 
@@ -312,13 +312,17 @@ export async function POST(req: Request) {
 
     const blankCrfDate = normalizeDate(parsed.dateRaw);
 
-    // ✅ 핵심: fs.readFile 반환 타입(NonSharedBuffer)을 Buffer로 명시 변환
+    // ✅ 템플릿 로드 (TS 타입 충돌 회피: Buffer로 만들고 exceljs에는 any로 전달)
     const templatePath = path.join(process.cwd(), "public", "templates", "econtents_template.xlsx");
     const templateRaw = await fs.readFile(templatePath);
-    const templateBuffer = Buffer.from(templateRaw);
+
+    // Node 타입에 따라 Buffer<ArrayBuffer>로 잡힐 수 있어, 확실히 Buffer로 생성
+    const templateBuffer = Buffer.from(templateRaw as any);
 
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(templateBuffer);
+
+    // ✅ 핵심: exceljs 타입 정의(구형 Buffer)와 Node 타입(신형 Buffer<T>) 충돌을 캐스팅으로 해소
+    await workbook.xlsx.load(templateBuffer as unknown as any);
 
     const protocolWs = workbook.getWorksheet("Protocol");
     if (!protocolWs) throw new Error("템플릿에서 'Protocol' 시트를 찾지 못했습니다.");
