@@ -100,8 +100,6 @@ function normalizeDate(dateRaw: string): string {
 
 /* -----------------------------
  * DOCX HTML에서 Schedule of Assessments 표 헤더(Visit) 추출
- * - cheerio 버전 의존 타입(AnyNode 등) 제거
- * - 타입은 unknown으로 받고, 사용할 때만 as any 처리
  * ---------------------------- */
 function extractVisitsFromDocxHtml(docxHtml: string): string[] {
   const $: CheerioAPI = load(docxHtml);
@@ -109,7 +107,6 @@ function extractVisitsFromDocxHtml(docxHtml: string): string[] {
   const scheduleNodes = $(":contains('Schedule of Assessments'), :contains('SCHEDULE OF ASSESSMENTS')");
   if (!scheduleNodes || scheduleNodes.length === 0) return [];
 
-  // ✅ Cheerio<unknown>으로 고정(never 방지)
   let table: Cheerio<unknown> | null = null;
 
   scheduleNodes.each((idx: number, el: unknown) => {
@@ -315,8 +312,10 @@ export async function POST(req: Request) {
 
     const blankCrfDate = normalizeDate(parsed.dateRaw);
 
+    // ✅ 핵심: fs.readFile 반환 타입(NonSharedBuffer)을 Buffer로 명시 변환
     const templatePath = path.join(process.cwd(), "public", "templates", "econtents_template.xlsx");
-    const templateBuffer = await fs.readFile(templatePath);
+    const templateRaw = await fs.readFile(templatePath);
+    const templateBuffer = Buffer.from(templateRaw);
 
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(templateBuffer);
