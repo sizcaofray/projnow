@@ -1,5 +1,5 @@
 // app/contents/_components/AdminOnlyLinks.tsx
-// ✅ admin 사용자에게만 Menu Setting / User Management 링크를 노출하는 전용 컴포넌트
+// ✅ admin 사용자에게만 Menu Setting / User Management / SDTM DB Manage 링크를 노출하는 전용 컴포넌트
 // - Server Component(layout)에서는 Firebase Auth 상태를 직접 못 읽기 때문에 Client Component로 분리
 // - users/{uid}.role === "admin" 인 경우에만 링크 노출
 
@@ -68,6 +68,14 @@ export default function AdminOnlyLinks() {
         className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
       >
         User Management
+      </Link>
+
+      {/* ✅ SDTM DB Manage (User Management 아래 추가) */}
+      <Link
+        href="/contents/admin/sdtm"
+        className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
+      >
+        SDTM DB Manage
       </Link>
     </>
   );
