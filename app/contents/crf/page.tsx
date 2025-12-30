@@ -115,14 +115,12 @@ export default function CRFPage() {
    * Drag & Drop 이벤트
    */
   const onDragEnter = (e: React.DragEvent) => {
-    // 기본 동작 방지(브라우저 열기 방지)
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(true);
   };
 
   const onDragOver = (e: React.DragEvent) => {
-    // drop 허용을 위해 반드시 preventDefault 필요
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(true);
@@ -265,7 +263,7 @@ export default function CRFPage() {
   };
 
   /**
-   * 최소 스타일(인라인) — 기존 디자인/테일윈드 의존 없이 동작
+   * 최소 스타일(인라인)
    */
   const cardStyle: React.CSSProperties = {
     border: "1px solid rgba(0,0,0,0.12)",
@@ -286,6 +284,22 @@ export default function CRFPage() {
 
   const subtleText: React.CSSProperties = { fontSize: 12, opacity: 0.75 };
 
+  /**
+   * 섹션 헤더(좌: 제목 / 우: 버튼) 공통 UI
+   */
+  const SectionHeader = ({
+    title,
+    right,
+  }: {
+    title: string;
+    right?: React.ReactNode;
+  }) => (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+      <div style={{ fontWeight: 800 }}>{title}</div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>{right}</div>
+    </div>
+  );
+
   return (
     <div style={{ padding: 18, maxWidth: 1300, margin: "0 auto" }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
@@ -295,57 +309,50 @@ export default function CRFPage() {
 
       {/* 업로드 카드 */}
       <div style={{ ...cardStyle, marginBottom: 14 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-          <div>
-            <div style={{ fontWeight: 800, marginBottom: 6 }}>Protocol 업로드</div>
-            <div style={subtleText}>
-              docx 파일을 드래그&드롭하거나 파일 선택으로 업로드하세요. (형식이 달라도 자동 추출 후 수정 가능)
-            </div>
-            {fileName && (
-              <div style={{ marginTop: 8, ...subtleText }}>
-                현재 파일: <b style={{ opacity: 0.95 }}>{fileName}</b>
-              </div>
-            )}
-          </div>
+        <SectionHeader
+          title="Protocol 업로드"
+          right={
+            <>
+              <input
+                ref={inputRef}
+                type="file"
+                accept=".docx"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handleUpload(f);
+                }}
+                style={{ display: "none" }}
+              />
 
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <input
-              ref={inputRef}
-              type="file"
-              accept=".docx"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) handleUpload(f);
-              }}
-              style={{ display: "none" }}
-            />
+              <button type="button" style={btnStyle} onClick={() => inputRef.current?.click()} disabled={loading}>
+                파일 선택
+              </button>
 
-            <button type="button" style={btnStyle} onClick={() => inputRef.current?.click()} disabled={loading}>
-              파일 선택
-            </button>
+              <button
+                type="button"
+                style={{
+                  ...btnStyle,
+                  opacity: items.length === 0 || visits.length === 0 ? 0.5 : 1,
+                  cursor: items.length === 0 || visits.length === 0 ? "not-allowed" : "pointer",
+                }}
+                onClick={downloadExcel}
+                disabled={items.length === 0 || visits.length === 0}
+              >
+                Excel 다운로드
+              </button>
+            </>
+          }
+        />
 
-            <button
-              type="button"
-              style={{
-                ...btnStyle,
-                opacity: items.length === 0 || visits.length === 0 ? 0.5 : 1,
-                cursor: items.length === 0 || visits.length === 0 ? "not-allowed" : "pointer",
-              }}
-              onClick={downloadExcel}
-              disabled={items.length === 0 || visits.length === 0}
-            >
-              Excel 다운로드
-            </button>
-
-            <button type="button" style={btnStyle} onClick={addPage} disabled={loading}>
-              페이지 추가
-            </button>
-
-            <button type="button" style={btnStyle} onClick={addItem} disabled={loading}>
-              항목 추가
-            </button>
-          </div>
+        <div style={subtleText}>
+          docx 파일을 드래그&드롭하거나 파일 선택으로 업로드하세요. (형식이 달라도 자동 추출 후 수정 가능)
         </div>
+
+        {fileName && (
+          <div style={{ marginTop: 8, ...subtleText }}>
+            현재 파일: <b style={{ opacity: 0.95 }}>{fileName}</b>
+          </div>
+        )}
 
         {/* Dropzone */}
         <div
@@ -371,9 +378,7 @@ export default function CRFPage() {
           <div style={{ fontWeight: 800, fontSize: 14 }}>
             {loading ? "파싱 중입니다..." : "여기에 Protocol(.docx)을 드래그&드롭"}
           </div>
-          <div style={{ ...subtleText, marginTop: 6 }}>
-            클릭해도 파일 선택창이 열립니다.
-          </div>
+          <div style={{ ...subtleText, marginTop: 6 }}>클릭해도 파일 선택창이 열립니다.</div>
         </div>
 
         {/* 에러/경고 */}
@@ -400,7 +405,7 @@ export default function CRFPage() {
       {/* Visits 편집 */}
       {visits.length > 0 && (
         <div style={{ ...cardStyle, marginBottom: 14 }}>
-          <div style={{ fontWeight: 800, marginBottom: 10 }}>Visits (방문)</div>
+          <SectionHeader title="Visits (방문)" />
           <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
             {sortedVisits.map((v) => (
               <div
@@ -433,7 +438,14 @@ export default function CRFPage() {
       {/* Pages 편집 */}
       {pages.length > 0 && (
         <div style={{ ...cardStyle, marginBottom: 14 }}>
-          <div style={{ fontWeight: 800, marginBottom: 10 }}>Pages (CRF 페이지 그룹)</div>
+          <SectionHeader
+            title="Pages (CRF 페이지 그룹)"
+            right={
+              <button type="button" style={btnStyle} onClick={addPage} disabled={loading}>
+                + 페이지 추가
+              </button>
+            }
+          />
 
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
@@ -462,11 +474,7 @@ export default function CRFPage() {
                       <div style={{ fontSize: 11, opacity: 0.6, marginTop: 4 }}>ID: {p.id}</div>
                     </td>
                     <td style={{ padding: 10, textAlign: "center", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
-                      <button
-                        type="button"
-                        onClick={() => removePage(p.id)}
-                        style={{ ...btnStyle, padding: "6px 10px" }}
-                      >
+                      <button type="button" onClick={() => removePage(p.id)} style={{ ...btnStyle, padding: "6px 10px" }}>
                         삭제
                       </button>
                     </td>
@@ -485,7 +493,14 @@ export default function CRFPage() {
       {/* Items */}
       {items.length > 0 && visits.length > 0 && (
         <div style={{ ...cardStyle }}>
-          <div style={{ fontWeight: 800, marginBottom: 10 }}>Items (수집 항목 × 방문 매핑)</div>
+          <SectionHeader
+            title="Items (수집 항목 × 방문 매핑)"
+            right={
+              <button type="button" style={btnStyle} onClick={addItem} disabled={loading}>
+                + 항목 추가
+              </button>
+            }
+          />
 
           <div style={{ overflowX: "auto", border: "1px solid rgba(0,0,0,0.10)", borderRadius: 12 }}>
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
@@ -566,11 +581,7 @@ export default function CRFPage() {
                     ))}
 
                     <td style={{ padding: 10, textAlign: "center", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
-                      <button
-                        type="button"
-                        onClick={() => removeItem(it.id)}
-                        style={{ ...btnStyle, padding: "6px 10px" }}
-                      >
+                      <button type="button" onClick={() => removeItem(it.id)} style={{ ...btnStyle, padding: "6px 10px" }}>
                         X
                       </button>
                     </td>
