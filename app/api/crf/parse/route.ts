@@ -3,15 +3,12 @@ import { NextResponse } from "next/server";
 import * as mammoth from "mammoth";
 import * as cheerio from "cheerio";
 
-/**
- * docx 파싱(mammoth) + cheerio는 Node 런타임이 안정적이므로 명시합니다.
- */
 export const runtime = "nodejs";
 
-/* =========================
- * 타입 정의
- * ========================= */
-
+/**
+ * 방문/폼/아이템 타입
+ * - formCode는 "자동 추정" 금지 → 항상 빈값 시작 (사용자 수정)
+ */
 type Visit = {
   id: string;
   labelOriginal: string;
@@ -20,30 +17,27 @@ type Visit = {
 };
 
 type Page = {
-  id: string;
-  name: string;
+  id: string;        // formId
+  name: string;      // formName
+  formCode: string;  // always "", user editable
 };
 
 type Item = {
   id: string;
   nameOriginal: string;
   nameDisplay: string;
-  pageId: string;
+  pageId: string; // formId
   evidence?: string;
   visitMap: Record<string, boolean>;
 };
-
-/* =========================
- * 유틸
- * ========================= */
 
 function safeTrim(v: string) {
   return (v ?? "").replace(/\u00A0/g, " ").trim();
 }
 
 /**
- * Visit 헤더인지 판단(형식 불문)
- * - Visit 1 / V1 / Screening / Baseline / Day 1 / Week 4 / C1D1 등
+ * Visit 헤더(방문 컬럼) 유사도 판단
+ * - 문서/표가 달라도 대체로 공통 패턴을 포괄
  */
 function isVisitLikeHeader(text: string) {
   const t = safeTrim(text).toLowerCase();
@@ -73,17 +67,16 @@ function isVisitLikeHeader(text: string) {
 }
 
 /**
- * Visit 라벨을 내부 ID / 정렬키로 정규화
+ * Visit 라벨을 정규화하여 id/orderKey 부여
+ * - 고정 포맷 의존 최소화
  */
 function normalizeVisitLabel(label: string): Visit {
   const raw = safeTrim(label);
-  const low = raw.toLowerCase();
 
   let orderKey = 999999;
   let id =
     `v_${raw.replace(/\s+/g, "_").replace(/[^a-zA-Z0-9_]/g, "").toLowerCase() || "x"}`;
 
-  // 고정 키워드 우선 정렬
   const fixedOrder: Array<[RegExp, number, string]> = [
     [/screening/i, 0, "screening"],
     [/baseline/i, 10, "baseline"],
@@ -102,7 +95,6 @@ function normalizeVisitLabel(label: string): Visit {
     }
   }
 
-  // Visit 숫자
   const mVisit = raw.match(/visit\s*(\d+)/i) || raw.match(/\bv\s*(\d+)\b/i);
   if (mVisit?.[1]) {
     const n = Number(mVisit[1]);
@@ -112,7 +104,6 @@ function normalizeVisitLabel(label: string): Visit {
     }
   }
 
-  // Day/Week/Month 숫자
   const mDay = raw.match(/day\s*(\d+)/i) || raw.match(/\bd\s*(\d+)\b/i);
   if (mDay?.[1]) {
     const n = Number(mDay[1]);
@@ -140,7 +131,6 @@ function normalizeVisitLabel(label: string): Visit {
     }
   }
 
-  // Cycle-Day: CxDy
   const mC = raw.match(/c(\d+)\s*d(\d+)/i) || raw.match(/c(\d+)d(\d+)/i);
   if (mC?.[1] && mC?.[2]) {
     const c = Number(mC[1]);
@@ -151,9 +141,6 @@ function normalizeVisitLabel(label: string): Visit {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const _ = low; // low는 디버깅 시 유용하므로 남김
-
   return {
     id,
     labelOriginal: raw,
@@ -163,7 +150,8 @@ function normalizeVisitLabel(label: string): Visit {
 }
 
 /**
- * 셀 값이 수행/수집을 의미하는지 판단
+ * 표의 체크/기호/숫자 등 “수행 여부”로 간주할 값 판단
+ * - 문서마다 기호가 달라서 넉넉히 허용
  */
 function cellTruthy(text: string) {
   const t = safeTrim(text);
@@ -183,38 +171,8 @@ function cellTruthy(text: string) {
 }
 
 /**
- * Item -> Page 자동 그룹핑(MVP)
- */
-function inferPageName(itemName: string) {
-  const t = safeTrim(itemName).toLowerCase();
-
-  const rules: Array<[RegExp, string]> = [
-    [/informed\s*consent|동의/i, "Informed Consent"],
-    [/inclusion|exclusion|선정|제외/i, "Eligibility"],
-    [/demograph|인구학/i, "Demographics"],
-    [/medical\s*history|병력|과거력/i, "Medical History"],
-    [/vital|활력/i, "Vital Signs"],
-    [/physical\s*exam|신체검사/i, "Physical Exam"],
-    [/lab|laboratory|실험실/i, "Laboratory"],
-    [/pregnan|임신/i, "Pregnancy Test"],
-    [/ecg|electrocard/i, "ECG"],
-    [/endoscopy|내시경/i, "Endoscopy"],
-    [/symptom|증상/i, "Symptoms"],
-    [/quality|qol|설문|questionnaire/i, "QoL / Questionnaire"],
-    [/ae|adverse|이상반응/i, "Adverse Events"],
-    [/concomitant|병용약/i, "Concomitant Meds"],
-    [/drug|dose|투약|복약/i, "Treatment / Exposure"],
-  ];
-
-  for (const [re, page] of rules) {
-    if (re.test(itemName) || re.test(t)) return page;
-  }
-  return "General";
-}
-
-/**
- * 모든 테이블 중 "Visit 헤더"가 가장 많이 잡히는 테이블을 스케줄표 후보로 선택
- * - cheerio.Element 타입을 쓰지 않도록 any로 처리 (ESM 타입 호환 이슈 방지)
+ * “표 후보” 선택:
+ * - visit-like 헤더가 많이 등장하는 table을 스코어링하여 선택
  */
 function pickBestScheduleTable($: cheerio.CheerioAPI) {
   const tables = $("table").toArray();
@@ -225,11 +183,10 @@ function pickBestScheduleTable($: cheerio.CheerioAPI) {
   for (const tbl of tables) {
     const $tbl = $(tbl);
 
-    // 첫 2행까지 헤더 후보
     const headerCells: string[] = [];
     $tbl
       .find("tr")
-      .slice(0, 2)
+      .slice(0, 3)
       .each((_, tr) => {
         $(tr)
           .find("th,td")
@@ -241,40 +198,103 @@ function pickBestScheduleTable($: cheerio.CheerioAPI) {
     const visitLikeCount = headerCells.filter((h) => isVisitLikeHeader(h)).length;
     const rowCount = $tbl.find("tr").length;
 
-    const score = visitLikeCount * 10 + Math.min(rowCount, 50);
+    // visit-like 많을수록, row가 적당히 많을수록 점수 증가
+    const score = visitLikeCount * 12 + Math.min(rowCount, 80);
 
     if (!best || score > best.score) best = { score, table: tbl };
   }
 
-  if (!best || best.score < 20) return null;
+  if (!best || best.score < 24) return null;
   return best.table;
 }
 
 /**
- * 스케줄 테이블에서 visits/pages/items 생성
+ * Form 헤더 행(그룹 행) 추정:
+ * - “visit 컬럼이 비어있고”, “비-visit 텍스트가 짧고 제목처럼 보이며”
+ * - 또는 “colspan이 크거나”, “th 중심” 등의 특징을 사용
+ * - 고정 키워드 매핑 없이 구조 특징 기반으로만 판단
  */
-function parseScheduleTable(html: string) {
+function isFormHeaderRow(params: {
+  $: cheerio.CheerioAPI;
+  rowEl: any;
+  visitColIdxs: number[];
+}) {
+  const { $, rowEl, visitColIdxs } = params;
+
+  const cells = $(rowEl).find("th,td").toArray();
+  if (cells.length === 0) return { ok: false, title: "" };
+
+  // visit 셀에 내용이 거의 없으면(비어있으면) 헤더 가능성 ↑
+  const visitTexts = visitColIdxs
+    .map((i) => safeTrim($(cells[i] ?? "").text()))
+    .filter(Boolean);
+
+  if (visitTexts.length > 0) return { ok: false, title: "" };
+
+  // 비-visit 텍스트 모으기
+  const nonVisitTexts = cells
+    .map((c: any, idx: number) => ({ idx, t: safeTrim($(c).text()), el: c }))
+    .filter((x) => !visitColIdxs.includes(x.idx))
+    .map((x) => x.t)
+    .filter(Boolean);
+
+  const joined = safeTrim(nonVisitTexts.join(" ").replace(/\s+/g, " "));
+  if (!joined) return { ok: false, title: "" };
+
+  // 너무 길면(문단) Form 헤더로 보기 어려움
+  if (joined.length > 90) return { ok: false, title: "" };
+
+  // 숫자/기호 비율이 높으면(범위/수치) 헤더 가능성 낮음
+  const digitCount = (joined.match(/[0-9]/g) || []).length;
+  if (digitCount / Math.max(joined.length, 1) > 0.25) return { ok: false, title: "" };
+
+  // colspan이 큰 단일 셀(또는 대표 셀)이 있으면 헤더 가능성 매우 높음
+  let hasLargeColspan = false;
+  for (const c of cells) {
+    const colspanAttr = $(c).attr("colspan");
+    const colspan = colspanAttr ? Number(colspanAttr) : 1;
+    if (!Number.isNaN(colspan) && colspan >= Math.max(3, Math.floor(cells.length * 0.6))) {
+      hasLargeColspan = true;
+      break;
+    }
+  }
+
+  // th가 포함되어 있으면(제목 행일 확률) 헤더 가능성 ↑
+  const hasTh = $(rowEl).find("th").length > 0;
+
+  // “짧은 제목” + (colspan 크거나 th 포함) 이면 Form 헤더로 채택
+  const ok = joined.length >= 2 && (hasLargeColspan || hasTh);
+
+  return { ok, title: joined };
+}
+
+/**
+ * 실제 파싱:
+ * - 표 1개를 선택
+ * - visit 헤더 추출
+ * - 이후 행을 순회하며 Form 헤더 / Item 행을 구분
+ */
+function parseScheduleTableFromHtml(html: string) {
   const $ = cheerio.load(html);
 
   const tableEl = pickBestScheduleTable($);
-
   if (!tableEl) {
     return {
       visits: [] as Visit[],
       pages: [] as Page[],
       items: [] as Item[],
-      warnings: ["No schedule-like table detected. (MVP: fallback not implemented)"],
+      warnings: ["No schedule-like table detected."],
     };
   }
 
   const $tbl = $(tableEl);
   const rows = $tbl.find("tr").toArray();
 
-  // 1) 헤더 행 찾기(visit-like 가장 많은 행)
+  // (1) 헤더 행 찾기: visit-like가 가장 많은 행을 선택
   let headerRowIdx = 0;
   let maxVisitLike = -1;
 
-  rows.slice(0, Math.min(rows.length, 5)).forEach((tr, idx) => {
+  rows.slice(0, Math.min(rows.length, 6)).forEach((tr, idx) => {
     const cells = $(tr).find("th,td").toArray();
     const texts = cells.map((c) => safeTrim($(c).text()));
     const cnt = texts.filter(isVisitLikeHeader).length;
@@ -287,7 +307,7 @@ function parseScheduleTable(html: string) {
   const headerCells = $(rows[headerRowIdx]).find("th,td").toArray();
   const headerTexts = headerCells.map((c) => safeTrim($(c).text()));
 
-  // 2) Visit 컬럼 인덱스 + 라벨 수집(헤더 순서 유지)
+  // (2) visit 컬럼 인덱스 수집
   const visitCols: Array<{ colIdx: number; visit: Visit }> = [];
   headerTexts.forEach((h, idx) => {
     if (isVisitLikeHeader(h)) {
@@ -304,71 +324,96 @@ function parseScheduleTable(html: string) {
     };
   }
 
-  // 중복 visitId 제거 + 정렬(표시/정렬용)
+  // 방문 중복 제거/정렬
   const uniq: Record<string, Visit> = {};
   for (const vc of visitCols) uniq[vc.visit.id] = vc.visit;
-
   const visits = Object.values(uniq).sort((a, b) => a.orderKey - b.orderKey);
 
-  // 3) 아이템 파싱
-  const items: Item[] = [];
-  const pagesMap: Record<string, Page> = {};
+  const visitColIdxs = visitCols.map((v) => v.colIdx);
 
+  // (3) Form/Item 추출
+  const pagesByName: Record<string, Page> = {};
+  const items: Item[] = [];
+  const warnings: string[] = [];
+
+  // 현재 Form(문서 내 그룹 헤더 기반)
+  let currentFormName = "General";
+
+  // General은 미리 만들지 않고, 실제로 필요할 때 생성
+  const ensureForm = (formName: string) => {
+    const key = safeTrim(formName) || "General";
+    if (!pagesByName[key]) {
+      pagesByName[key] = {
+        id: `f_${Object.keys(pagesByName).length + 1}`,
+        name: key,
+        formCode: "", // 고정 매핑 금지 → 항상 빈값
+      };
+    }
+    return pagesByName[key];
+  };
+
+  // 헤더 다음 행부터 순회
   for (let r = headerRowIdx + 1; r < rows.length; r++) {
-    const cells = $(rows[r]).find("th,td").toArray();
+    const rowEl = rows[r];
+    const cells = $(rowEl).find("th,td").toArray();
     if (cells.length === 0) continue;
 
-    // item명 후보: 첫 셀(가장 흔한 케이스)
-    let itemName = safeTrim($(cells[0]).text());
-
-    // 비어 있으면 visit 컬럼이 아닌 것 중 가장 긴 텍스트 선택
-    if (!itemName) {
-      const texts = cells.map((c) => safeTrim($(c).text()));
-      const nonVisitTexts = texts
-        .map((t, idx) => ({ t, idx }))
-        .filter((x) => !visitCols.some((vc) => vc.colIdx === x.idx))
-        .map((x) => x.t)
-        .filter(Boolean);
-
-      itemName = nonVisitTexts.sort((a, b) => b.length - a.length)[0] || "";
+    // (A) Form 헤더 행인지 판단(구조 기반)
+    const formHeader = isFormHeaderRow({ $, rowEl, visitColIdxs });
+    if (formHeader.ok) {
+      currentFormName = formHeader.title || "General";
+      ensureForm(currentFormName);
+      continue;
     }
 
-    if (!itemName || itemName.length < 2) continue;
+    // (B) Item 행 처리: 비-visit 텍스트에서 itemName 추출
+    const nonVisitCells = cells
+      .map((c: any, idx: number) => ({ idx, c, t: safeTrim($(c).text()) }))
+      .filter((x) => !visitColIdxs.includes(x.idx));
 
-    // 페이지 추론
-    const pageName = inferPageName(itemName);
-    if (!pagesMap[pageName]) {
-      pagesMap[pageName] = { id: `p_${Object.keys(pagesMap).length + 1}`, name: pageName };
-    }
+    // itemName 후보: 첫 번째 의미있는 텍스트(너무 짧은 텍스트는 제외)
+    const itemNameCandidate =
+      nonVisitCells.map((x) => x.t).find((t) => t && t.length >= 2) || "";
+
+    // itemName이 없으면 스킵
+    if (!itemNameCandidate) continue;
 
     // visitMap 생성
     const visitMap: Record<string, boolean> = {};
     const evidenceParts: string[] = [];
 
     for (const vc of visitCols) {
-      const cellText = safeTrim($(cells[vc.colIdx]).text());
-      visitMap[vc.visit.id] = cellTruthy(cellText);
+      const cellText = safeTrim($(cells[vc.colIdx] ?? "").text());
+      const truthy = cellTruthy(cellText);
+      visitMap[vc.visit.id] = truthy;
       if (cellText) evidenceParts.push(`${vc.visit.labelDisplay}:${cellText}`);
     }
 
+    // 모든 visit이 false이고, itemName이 “주석/설명”처럼 보이면 스킵(너무 공격적이면 제거 가능)
+    const anyTrue = Object.values(visitMap).some(Boolean);
+    if (!anyTrue && itemNameCandidate.length > 80) continue;
+
+    // currentFormName 보장
+    const form = ensureForm(currentFormName);
+
     items.push({
       id: `i_${items.length + 1}`,
-      nameOriginal: itemName,
-      nameDisplay: itemName,
-      pageId: pagesMap[pageName].id,
+      nameOriginal: itemNameCandidate,
+      nameDisplay: itemNameCandidate,
+      pageId: form.id,
       evidence: evidenceParts.join(" | "),
       visitMap,
     });
   }
 
-  const pages = Object.values(pagesMap);
+  const pages = Object.values(pagesByName);
 
-  return { visits, pages, items, warnings: [] as string[] };
+  if (pages.length === 0) {
+    warnings.push("No form group headers detected. All items may be grouped into General.");
+  }
+
+  return { visits, pages, items, warnings };
 }
-
-/* =========================
- * Route Handler
- * ========================= */
 
 export async function POST(req: Request) {
   try {
@@ -382,9 +427,11 @@ export async function POST(req: Request) {
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
+    // docx -> html
     const { value: html } = await mammoth.convertToHtml({ buffer });
 
-    const parsed = parseScheduleTable(html);
+    // 핵심: 표 후보에서 Form + Navigation(Item visitMap) 구성
+    const parsed = parseScheduleTableFromHtml(html);
 
     return NextResponse.json({
       ok: true,
@@ -392,9 +439,6 @@ export async function POST(req: Request) {
       ...parsed,
     });
   } catch (err: any) {
-    return NextResponse.json(
-      { ok: false, message: err?.message || "Parse failed." },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, message: err?.message || "Parse failed." }, { status: 500 });
   }
 }
