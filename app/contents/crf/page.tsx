@@ -263,47 +263,111 @@ export default function CRFPage() {
   };
 
   /**
-   * 최소 스타일(인라인)
+   * 다크모드/라이트모드 자동 대응을 위한 CSS 변수
+   * - OS/브라우저 기본 모드를 그대로 따릅니다.
+   */
+  const themeCss = `
+    .crf-wrap{
+      --bg: #ffffff;
+      --text: #0b0f19;
+      --muted: rgba(11,15,25,0.7);
+
+      --card-bg: rgba(255,255,255,0.78);
+      --card-border: rgba(11,15,25,0.14);
+
+      --surface: rgba(255,255,255,0.70);
+      --surface-strong: rgba(255,255,255,0.88);
+
+      --border: rgba(11,15,25,0.14);
+      --border-soft: rgba(11,15,25,0.10);
+
+      --btn-bg: rgba(255,255,255,0.90);
+      --btn-border: rgba(11,15,25,0.18);
+
+      --drop-bg: rgba(11,15,25,0.02);
+      --drop-bg-active: rgba(11,15,25,0.05);
+      --drop-border: rgba(11,15,25,0.28);
+      --drop-border-active: rgba(11,15,25,0.85);
+
+      --input-bg: rgba(255,255,255,0.92);
+      --input-border: rgba(11,15,25,0.18);
+
+      --danger: #c31919;
+      --warn: #a36a00;
+    }
+
+    @media (prefers-color-scheme: dark){
+      .crf-wrap{
+        --bg: #0b0f19;
+        --text: #e8eefc;
+        --muted: rgba(232,238,252,0.72);
+
+        --card-bg: rgba(255,255,255,0.06);
+        --card-border: rgba(232,238,252,0.14);
+
+        --surface: rgba(255,255,255,0.06);
+        --surface-strong: rgba(255,255,255,0.10);
+
+        --border: rgba(232,238,252,0.16);
+        --border-soft: rgba(232,238,252,0.10);
+
+        --btn-bg: rgba(255,255,255,0.08);
+        --btn-border: rgba(232,238,252,0.16);
+
+        --drop-bg: rgba(255,255,255,0.04);
+        --drop-bg-active: rgba(255,255,255,0.07);
+        --drop-border: rgba(232,238,252,0.22);
+        --drop-border-active: rgba(232,238,252,0.65);
+
+        --input-bg: rgba(255,255,255,0.08);
+        --input-border: rgba(232,238,252,0.18);
+
+        --danger: #ff6b6b;
+        --warn: #ffb020;
+      }
+    }
+  `;
+
+  /**
+   * 최소 스타일(인라인 + CSS 변수 사용)
    */
   const cardStyle: React.CSSProperties = {
-    border: "1px solid rgba(0,0,0,0.12)",
+    border: "1px solid var(--card-border)",
     borderRadius: 12,
     padding: 14,
-    background: "rgba(255,255,255,0.75)",
+    background: "var(--card-bg)",
     backdropFilter: "blur(6px)",
+    color: "var(--text)",
   };
 
   const btnStyle: React.CSSProperties = {
     padding: "8px 12px",
     borderRadius: 10,
-    border: "1px solid rgba(0,0,0,0.18)",
-    background: "white",
+    border: "1px solid var(--btn-border)",
+    background: "var(--btn-bg)",
+    color: "var(--text)",
     cursor: "pointer",
-    fontWeight: 600,
+    fontWeight: 700,
   };
 
-  const subtleText: React.CSSProperties = { fontSize: 12, opacity: 0.75 };
+  const subtleText: React.CSSProperties = { fontSize: 12, opacity: 0.85, color: "var(--muted)" };
 
   /**
    * 섹션 헤더(좌: 제목 / 우: 버튼) 공통 UI
    */
-  const SectionHeader = ({
-    title,
-    right,
-  }: {
-    title: string;
-    right?: React.ReactNode;
-  }) => (
+  const SectionHeader = ({ title, right }: { title: string; right?: React.ReactNode }) => (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
-      <div style={{ fontWeight: 800 }}>{title}</div>
+      <div style={{ fontWeight: 800, color: "var(--text)" }}>{title}</div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>{right}</div>
     </div>
   );
 
   return (
-    <div style={{ padding: 18, maxWidth: 1300, margin: "0 auto" }}>
+    <div className="crf-wrap" style={{ padding: 18, maxWidth: 1300, margin: "0 auto" }}>
+      <style>{themeCss}</style>
+
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>CRF Builder</h1>
+        <h1 style={{ fontSize: 22, fontWeight: 900, margin: 0, color: "var(--text)" }}>CRF Builder</h1>
         <span style={subtleText}>/contents/crf</span>
       </div>
 
@@ -332,7 +396,7 @@ export default function CRFPage() {
                 type="button"
                 style={{
                   ...btnStyle,
-                  opacity: items.length === 0 || visits.length === 0 ? 0.5 : 1,
+                  opacity: items.length === 0 || visits.length === 0 ? 0.55 : 1,
                   cursor: items.length === 0 || visits.length === 0 ? "not-allowed" : "pointer",
                 }}
                 onClick={downloadExcel}
@@ -350,7 +414,7 @@ export default function CRFPage() {
 
         {fileName && (
           <div style={{ marginTop: 8, ...subtleText }}>
-            현재 파일: <b style={{ opacity: 0.95 }}>{fileName}</b>
+            현재 파일: <b style={{ color: "var(--text)" }}>{fileName}</b>
           </div>
         )}
 
@@ -366,16 +430,17 @@ export default function CRFPage() {
           style={{
             marginTop: 14,
             borderRadius: 14,
-            border: isDragging ? "2px dashed #111" : "2px dashed rgba(0,0,0,0.25)",
-            background: isDragging ? "rgba(0,0,0,0.04)" : "rgba(0,0,0,0.02)",
+            border: isDragging ? "2px dashed var(--drop-border-active)" : "2px dashed var(--drop-border)",
+            background: isDragging ? "var(--drop-bg-active)" : "var(--drop-bg)",
             padding: 18,
             textAlign: "center",
             cursor: "pointer",
             transition: "all 120ms ease",
             userSelect: "none",
+            color: "var(--text)",
           }}
         >
-          <div style={{ fontWeight: 800, fontSize: 14 }}>
+          <div style={{ fontWeight: 900, fontSize: 14 }}>
             {loading ? "파싱 중입니다..." : "여기에 Protocol(.docx)을 드래그&드롭"}
           </div>
           <div style={{ ...subtleText, marginTop: 6 }}>클릭해도 파일 선택창이 열립니다.</div>
@@ -383,14 +448,14 @@ export default function CRFPage() {
 
         {/* 에러/경고 */}
         {error && (
-          <div style={{ marginTop: 12, color: "crimson", fontWeight: 700 }}>
+          <div style={{ marginTop: 12, color: "var(--danger)", fontWeight: 800 }}>
             오류: <span style={{ fontWeight: 500 }}>{error}</span>
           </div>
         )}
 
         {warnings.length > 0 && (
-          <div style={{ marginTop: 12, color: "#a36a00" }}>
-            <div style={{ fontWeight: 800 }}>경고</div>
+          <div style={{ marginTop: 12, color: "var(--warn)" }}>
+            <div style={{ fontWeight: 900 }}>경고</div>
             <ul style={{ margin: "6px 0 0 18px" }}>
               {warnings.map((w, idx) => (
                 <li key={idx} style={{ fontSize: 13 }}>
@@ -411,14 +476,17 @@ export default function CRFPage() {
               <div
                 key={v.id}
                 style={{
-                  border: "1px solid rgba(0,0,0,0.12)",
+                  border: "1px solid var(--border)",
                   borderRadius: 12,
                   padding: 10,
                   minWidth: 200,
-                  background: "rgba(255,255,255,0.65)",
+                  background: "var(--surface)",
+                  color: "var(--text)",
                 }}
               >
-                <div style={{ fontSize: 11, opacity: 0.75, marginBottom: 6 }}>ID: {v.id}</div>
+                <div style={{ fontSize: 11, opacity: 0.85, marginBottom: 6, color: "var(--muted)" }}>
+                  ID: {v.id}
+                </div>
                 <input
                   value={v.labelDisplay}
                   onChange={(e) => updateVisitLabel(v.id, e.target.value)}
@@ -426,7 +494,10 @@ export default function CRFPage() {
                     width: "100%",
                     padding: "8px 10px",
                     borderRadius: 10,
-                    border: "1px solid rgba(0,0,0,0.18)",
+                    border: "1px solid var(--input-border)",
+                    background: "var(--input-bg)",
+                    color: "var(--text)",
+                    outline: "none",
                   }}
                 />
               </div>
@@ -447,20 +518,18 @@ export default function CRFPage() {
             }
           />
 
-          <div style={{ overflowX: "auto" }}>
+          <div style={{ overflowX: "auto", borderRadius: 12, border: "1px solid var(--border-soft)" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
               <thead>
                 <tr>
-                  <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid rgba(0,0,0,0.12)" }}>
-                    Page Name
-                  </th>
-                  <th style={{ width: 120, padding: 10, borderBottom: "1px solid rgba(0,0,0,0.12)" }}>Action</th>
+                  <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid var(--border)" }}>Page Name</th>
+                  <th style={{ width: 120, padding: 10, borderBottom: "1px solid var(--border)" }}>Action</th>
                 </tr>
               </thead>
               <tbody>
                 {pages.map((p) => (
                   <tr key={p.id}>
-                    <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
+                    <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
                       <input
                         value={p.name}
                         onChange={(e) => updatePageName(p.id, e.target.value)}
@@ -468,12 +537,15 @@ export default function CRFPage() {
                           width: "100%",
                           padding: "8px 10px",
                           borderRadius: 10,
-                          border: "1px solid rgba(0,0,0,0.18)",
+                          border: "1px solid var(--input-border)",
+                          background: "var(--input-bg)",
+                          color: "var(--text)",
+                          outline: "none",
                         }}
                       />
-                      <div style={{ fontSize: 11, opacity: 0.6, marginTop: 4 }}>ID: {p.id}</div>
+                      <div style={{ fontSize: 11, opacity: 0.75, marginTop: 4, color: "var(--muted)" }}>ID: {p.id}</div>
                     </td>
-                    <td style={{ padding: 10, textAlign: "center", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
+                    <td style={{ padding: 10, textAlign: "center", borderBottom: "1px solid var(--border-soft)" }}>
                       <button type="button" onClick={() => removePage(p.id)} style={{ ...btnStyle, padding: "6px 10px" }}>
                         삭제
                       </button>
@@ -485,7 +557,7 @@ export default function CRFPage() {
           </div>
 
           <div style={{ ...subtleText, marginTop: 8 }}>
-            ※ 페이지 삭제 시 해당 항목은 자동으로 <b>General</b>로 이동됩니다.
+            ※ 페이지 삭제 시 해당 항목은 자동으로 <b style={{ color: "var(--text)" }}>General</b>로 이동됩니다.
           </div>
         </div>
       )}
@@ -502,29 +574,25 @@ export default function CRFPage() {
             }
           />
 
-          <div style={{ overflowX: "auto", border: "1px solid rgba(0,0,0,0.10)", borderRadius: 12 }}>
+          <div style={{ overflowX: "auto", border: "1px solid var(--border-soft)", borderRadius: 12 }}>
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
               <thead>
                 <tr>
-                  <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid rgba(0,0,0,0.12)" }}>
-                    Item Name
-                  </th>
-                  <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid rgba(0,0,0,0.12)" }}>
-                    Page
-                  </th>
+                  <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid var(--border)" }}>Item Name</th>
+                  <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid var(--border)" }}>Page</th>
                   {sortedVisits.map((v) => (
-                    <th key={v.id} style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.12)" }}>
+                    <th key={v.id} style={{ padding: 10, borderBottom: "1px solid var(--border)" }}>
                       {v.labelDisplay}
                     </th>
                   ))}
-                  <th style={{ width: 80, padding: 10, borderBottom: "1px solid rgba(0,0,0,0.12)" }}>Del</th>
+                  <th style={{ width: 80, padding: 10, borderBottom: "1px solid var(--border)" }}>Del</th>
                 </tr>
               </thead>
 
               <tbody>
                 {items.map((it) => (
                   <tr key={it.id}>
-                    <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
+                    <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
                       <input
                         value={it.nameDisplay}
                         onChange={(e) => updateItemName(it.id, e.target.value)}
@@ -532,17 +600,20 @@ export default function CRFPage() {
                           width: "100%",
                           padding: "8px 10px",
                           borderRadius: 10,
-                          border: "1px solid rgba(0,0,0,0.18)",
+                          border: "1px solid var(--input-border)",
+                          background: "var(--input-bg)",
+                          color: "var(--text)",
+                          outline: "none",
                         }}
                       />
                       {it.evidence && (
-                        <div style={{ fontSize: 11, opacity: 0.6, marginTop: 6, lineHeight: 1.3 }}>
+                        <div style={{ fontSize: 11, opacity: 0.75, marginTop: 6, lineHeight: 1.3, color: "var(--muted)" }}>
                           {it.evidence}
                         </div>
                       )}
                     </td>
 
-                    <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
+                    <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
                       <select
                         value={it.pageId}
                         onChange={(e) => updateItemPage(it.id, e.target.value)}
@@ -550,8 +621,10 @@ export default function CRFPage() {
                           width: "100%",
                           padding: "8px 10px",
                           borderRadius: 10,
-                          border: "1px solid rgba(0,0,0,0.18)",
-                          background: "white",
+                          border: "1px solid var(--input-border)",
+                          background: "var(--input-bg)",
+                          color: "var(--text)",
+                          outline: "none",
                         }}
                       >
                         {pages.map((p) => (
@@ -563,14 +636,7 @@ export default function CRFPage() {
                     </td>
 
                     {sortedVisits.map((v) => (
-                      <td
-                        key={v.id}
-                        style={{
-                          padding: 10,
-                          textAlign: "center",
-                          borderBottom: "1px solid rgba(0,0,0,0.08)",
-                        }}
-                      >
+                      <td key={v.id} style={{ padding: 10, textAlign: "center", borderBottom: "1px solid var(--border-soft)" }}>
                         <input
                           type="checkbox"
                           checked={!!it.visitMap?.[v.id]}
@@ -580,7 +646,7 @@ export default function CRFPage() {
                       </td>
                     ))}
 
-                    <td style={{ padding: 10, textAlign: "center", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
+                    <td style={{ padding: 10, textAlign: "center", borderBottom: "1px solid var(--border-soft)" }}>
                       <button type="button" onClick={() => removeItem(it.id)} style={{ ...btnStyle, padding: "6px 10px" }}>
                         X
                       </button>
