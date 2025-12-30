@@ -2,23 +2,22 @@
 
 /**
  * 📄 app/contents/admin/sdtm/page.tsx
- * - SDTM DB 관리 (A안) : 4개 탭 + 공통 검색/필터 + 테이블 + 상세패널 + CRUD
+ * - SDTM DB 관리 (A안) : 4개 탭 + 검색/필터 + 테이블 + 상세패널 + CRUD
  * - Firestore 컬렉션(기본): standardsCatalog, sdtmDomains, cdiscCodeLists, formDomainMap
  * - 관리자만 접근(클라이언트 가드) : users/{uid}.role === 'admin' 가정
  *
- * ✅ 사용자 요청 반영
- * - 코드 주석 포함
- * - 기존 디자인/마크업 큰 변경 없이, 최소 UI 구성
- * - 신규 파일 최소화(1개)
+ * ✅ 수정사항(빌드 에러 대응)
+ * - "@/lib/firebase/firebase" 에 auth export가 없으므로 auth import 제거
+ * - getAuth() + onAuthStateChanged()로 유저 확보
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
-// ✅ Firebase Auth/Firestore import (프로젝트에 맞게 경로 수정 필요)
-// 예시1) import { auth, db } from '@/lib/firebase/firebase';
-// 예시2) import { auth, db } from '@/lib/firebase';
-import { auth, db } from '@/lib/firebase/firebase';
+import { getAuth, onAuthStateChanged } from 'firebase/auth';
+
+// ✅ Firebase Firestore export는 db만 사용 (프로젝트 구조에 맞는 경로 유지)
+import { db } from '@/lib/firebase/firebase';
 
 import {
   collection,
@@ -31,7 +30,6 @@ import {
   query,
   setDoc,
   updateDoc,
-  where,
 } from 'firebase/firestore';
 
 /** -------------------------
@@ -40,18 +38,18 @@ import {
 type TabKey = 'catalog' | 'domains' | 'codelists' | 'formmap';
 
 type StandardsCatalog = {
-  id: string; // 문서 ID (standard_key 권장)
+  id: string;
   standard_key: string;
   current_version: string;
-  published_date?: string; // YYYY-MM-DD
+  published_date?: string;
   source_org?: string;
   notes?: string;
   updatedAt?: number;
 };
 
 type SdtmDomain = {
-  id: string; // 문서 ID (domain_code 권장)
-  domain_code: string; // UNIQUE
+  id: string;
+  domain_code: string;
   domain_label: string;
   domain_class?: string;
   description?: string;
@@ -61,7 +59,7 @@ type SdtmDomain = {
 };
 
 type CodeList = {
-  id: string; // 문서 ID (자동/또는 codelist_id+term_code 조합)
+  id: string;
   codelist_id: string;
   codelist_name: string;
   term_code?: string;
@@ -73,13 +71,15 @@ type CodeList = {
 };
 
 type FormDomainMap = {
-  id: string; // 문서 ID (자동/또는 form_name_pattern+domain_code 조합)
-  form_name_pattern: string; // 부분일치/정규식 정책은 이후 확장
+  id: string;
+  form_name_pattern: string;
   suggested_domain_code: string;
-  confidence_hint?: string; // "high/med/low" 또는 "0~1"
+  confidence_hint?: string;
   notes?: string;
   updatedAt?: number;
 };
+
+type RowAny = StandardsCatalog | SdtmDomain | CodeList | FormDomainMap;
 
 /** -------------------------
  * 유틸
@@ -87,18 +87,16 @@ type FormDomainMap = {
 function nowTs() {
   return Date.now();
 }
-
 function safeLower(s: string) {
   return (s ?? '').toLowerCase();
 }
-
 function includesAny(text: string, keywords: string[]) {
   const t = safeLower(text);
   return keywords.some((k) => t.includes(safeLower(k)));
 }
 
 /** -------------------------
- * 탭 메타 정의
+ * 탭 메타
  * ------------------------ */
 const TAB_LABEL: Record<TabKey, string> = {
   catalog: 'Standards Catalog',
@@ -106,8 +104,6 @@ const TAB_LABEL: Record<TabKey, string> = {
   codelists: 'CDISC Code Lists',
   formmap: 'Form ↔ Domain Map',
 };
-
-type RowAny = StandardsCatalog | SdtmDomain | CodeList | FormDomainMap;
 
 type ColumnDef = {
   key: string;
@@ -157,7 +153,6 @@ function getColumns(tab: TabKey): ColumnDef[] {
 }
 
 function getCollectionName(tab: TabKey) {
-  // ✅ A안에서 합의한 컬렉션명(기본)
   if (tab === 'catalog') return 'standardsCatalog';
   if (tab === 'domains') return 'sdtmDomains';
   if (tab === 'codelists') return 'cdiscCodeLists';
@@ -170,82 +165,76 @@ function getCollectionName(tab: TabKey) {
 export default function SdtmAdminPage() {
   const router = useRouter();
 
-  // ✅ 탭/검색/필터
+  // 탭/검색/필터
   const [tab, setTab] = useState<TabKey>('domains');
   const [keyword, setKeyword] = useState<string>('');
-  const [domainClassFilter, setDomainClassFilter] = useState<string>('ALL'); // domains 탭 전용
+  const [domainClassFilter, setDomainClassFilter] = useState<string>('ALL');
 
-  // ✅ 데이터/로딩/에러
+  // 데이터/로딩/에러
   const [rows, setRows] = useState<RowAny[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [err, setErr] = useState<string>('');
 
-  // ✅ 관리자 가드
+  // 관리자 가드
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
   const [checking, setChecking] = useState<boolean>(true);
 
-  // ✅ 선택 행(상세패널)
+  // 선택 행
   const [selected, setSelected] = useState<RowAny | null>(null);
 
-  // ✅ 모달(추가/수정)
+  // 모달(추가/수정)
   const [editOpen, setEditOpen] = useState<boolean>(false);
   const [editMode, setEditMode] = useState<'create' | 'update'>('create');
-  const [draft, setDraft] = useState<any>({}); // 탭별 동적 폼이므로 any 사용
+  const [draft, setDraft] = useState<any>({});
 
   /** -------------------------
-   * 1) 관리자 여부 확인 (users/{uid}.role === 'admin' 가정)
+   * 1) 관리자 여부 확인
+   * - auth export를 쓰지 않고 getAuth() + onAuthStateChanged() 사용
    * ------------------------ */
   useEffect(() => {
-    let alive = true;
+    const auth = getAuth();
 
-    async function run() {
+    // 로그인 상태 변경 감지
+    const unsub = onAuthStateChanged(auth, async (user) => {
       setChecking(true);
-      try {
-        const user = auth?.currentUser;
 
-        // 로그인 자체가 안 되어 있으면, 기존 정책에 맞춰 리다이렉트
+      try {
         if (!user) {
-          // ✅ 프로젝트 정책에 맞게 경로 변경 가능
+          // 비로그인: 정책에 따라 홈으로 이동
+          setIsAdmin(false);
+          setChecking(false);
           router.replace('/');
           return;
         }
 
-        // users/{uid} 문서에서 role 확인
+        // users/{uid}.role 확인
         const uref = doc(db, 'users', user.uid);
         const usnap = await getDoc(uref);
+        const roleRaw = usnap.exists() ? (usnap.data() as any)?.role : '';
+        const role = String(roleRaw ?? '').trim().toLowerCase();
 
-        const role = usnap.exists() ? (usnap.data() as any)?.role : null;
         const ok = role === 'admin';
-
-        if (!alive) return;
-
         setIsAdmin(ok);
         setChecking(false);
 
         // 관리자가 아니면 접근 차단
-        if (!ok) {
-          router.replace('/contents'); // ✅ 필요 시 수정
-        }
+        if (!ok) router.replace('/contents');
       } catch (e: any) {
-        if (!alive) return;
-        setChecking(false);
         setIsAdmin(false);
+        setChecking(false);
         setErr(e?.message ?? '권한 확인 중 오류가 발생했습니다.');
         router.replace('/contents');
       }
-    }
+    });
 
-    run();
-    return () => {
-      alive = false;
-    };
+    return () => unsub();
   }, [router]);
 
   /** -------------------------
-   * 2) 데이터 로드 (탭 변경/필터 변경 시)
+   * 2) 데이터 로드
    * ------------------------ */
   useEffect(() => {
-    if (!isAdmin) return; // 관리자만 로드
+    if (!isAdmin) return;
     loadRows().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, isAdmin]);
@@ -259,8 +248,7 @@ export default function SdtmAdminPage() {
       const colName = getCollectionName(tab);
       const colRef = collection(db, colName);
 
-      // ✅ 기본 쿼리(최근 업데이트 순)
-      // - 탭별로 필요한 where/orderBy 추가 가능
+      // 기본: updatedAt desc, 최대 500
       const q = query(colRef, orderBy('updatedAt', 'desc'), limit(500));
       const snap = await getDocs(q);
 
@@ -277,7 +265,7 @@ export default function SdtmAdminPage() {
   }
 
   /** -------------------------
-   * 3) 화면 표시용 필터(클라이언트)
+   * 3) 필터 옵션
    * ------------------------ */
   const domainClassOptions = useMemo(() => {
     if (tab !== 'domains') return [];
@@ -293,15 +281,12 @@ export default function SdtmAdminPage() {
     const keywords = k ? k.split(/\s+/).filter(Boolean) : [];
 
     return rows.filter((r: any) => {
-      // domains 탭: Domain Class 필터
       if (tab === 'domains' && domainClassFilter !== 'ALL') {
         if ((r?.domain_class ?? '') !== domainClassFilter) return false;
       }
 
-      // 키워드 검색(간단 contains)
       if (keywords.length === 0) return true;
 
-      // 탭별로 검색 대상 필드 확장
       const haystack =
         tab === 'catalog'
           ? `${r.standard_key} ${r.current_version} ${r.published_date} ${r.source_org} ${r.notes}`
@@ -316,7 +301,7 @@ export default function SdtmAdminPage() {
   }, [rows, keyword, tab, domainClassFilter]);
 
   /** -------------------------
-   * 4) CRUD 핸들러
+   * 4) CRUD
    * ------------------------ */
   function openCreate() {
     setEditMode('create');
@@ -332,7 +317,6 @@ export default function SdtmAdminPage() {
   }
 
   async function handleSave() {
-    // ✅ 탭별 필수값 검증
     const v = validateDraft(tab, draft);
     if (!v.ok) {
       alert(v.message);
@@ -344,27 +328,18 @@ export default function SdtmAdminPage() {
 
     try {
       const colName = getCollectionName(tab);
-
-      // ✅ 문서 ID 정책
-      // - catalog: standard_key
-      // - domains: domain_code
-      // - 나머지: 자동(id) 또는 조합키(간단히 자동) 사용
       const docId = computeDocId(tab, draft, editMode);
-
       const ref = doc(db, colName, docId);
 
       const payload = {
         ...draft,
-        id: docId, // UI 편의용(문서 내 id 저장)
+        id: docId,
         updatedAt: nowTs(),
       };
 
       if (editMode === 'create') {
-        // setDoc: 신규 생성(덮어쓰기 가능)
         await setDoc(ref, payload, { merge: false });
       } else {
-        // updateDoc: 기존 수정
-        // - 문서ID가 변경되는 경우가 있으므로, update에서는 docId 변경 허용 안 함(정책)
         await updateDoc(ref, payload);
       }
 
@@ -400,12 +375,6 @@ export default function SdtmAdminPage() {
     }
   }
 
-  /** -------------------------
-   * 5) Seed 재적재(placeholder)
-   * - 사용자가 제공한 엑셀(seed)을 그대로 업로드해 Firestore에 적재하는 기능은
-   *   프로젝트 의존성(xlsx 등) 확인 후 “다음 단계”에서 안전하게 붙이는 것을 권장합니다.
-   * - 버튼은 먼저 노출하되, 현재는 안내만 출력합니다.
-   * ------------------------ */
   function handleSeedReload() {
     alert(
       'Seed 재적재는 다음 단계에서 엑셀 업로드 → 시트 파싱 → 컬렉션별 upsert로 안전하게 구현하겠습니다.\n(현재는 UI/컬럼 구조(A안) 확정 단계입니다.)'
@@ -424,9 +393,7 @@ export default function SdtmAdminPage() {
     );
   }
 
-  if (!isAdmin) {
-    return null; // 라우터로 이동되므로 빈 렌더
-  }
+  if (!isAdmin) return null;
 
   const cols = getColumns(tab);
 
@@ -441,7 +408,6 @@ export default function SdtmAdminPage() {
           </p>
         </div>
 
-        {/* 우측 버튼 */}
         <div className="flex gap-2">
           <button
             onClick={handleSeedReload}
@@ -503,7 +469,6 @@ export default function SdtmAdminPage() {
           className="w-full md:w-[420px] px-3 py-2 rounded border bg-transparent"
         />
 
-        {/* domains 탭 전용 필터 */}
         {tab === 'domains' && (
           <select
             value={domainClassFilter}
@@ -530,9 +495,8 @@ export default function SdtmAdminPage() {
         </div>
       )}
 
-      {/* 본문: 테이블 + 상세패널 */}
+      {/* 테이블 + 상세 */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-        {/* 테이블 */}
         <div className="lg:col-span-2 border rounded overflow-hidden">
           <div className="overflow-auto max-h-[70vh]">
             <table className="min-w-full text-sm">
@@ -584,7 +548,6 @@ export default function SdtmAdminPage() {
           </div>
         </div>
 
-        {/* 상세패널 */}
         <div className="border rounded p-4">
           <h2 className="text-lg font-bold mb-2">상세</h2>
 
@@ -610,7 +573,8 @@ export default function SdtmAdminPage() {
               </div>
 
               <div className="text-xs text-gray-500">
-                updatedAt: {(selected as any)?.updatedAt ? new Date((selected as any).updatedAt).toLocaleString() : '-'}
+                updatedAt:{' '}
+                {(selected as any)?.updatedAt ? new Date((selected as any).updatedAt).toLocaleString() : '-'}
               </div>
             </div>
           )}
@@ -625,8 +589,7 @@ export default function SdtmAdminPage() {
           onSave={handleSave}
           saving={loading}
         >
-          <EditForm tab={tab} mode={editMode} draft={draft} setDraft={setDraft} rows={rows} />
-          {/* ✅ 정책 안내(문서ID 변경 제한) */}
+          <EditForm tab={tab} mode={editMode} draft={draft} setDraft={setDraft} />
           {editMode === 'update' && (tab === 'catalog' || tab === 'domains') && (
             <p className="text-xs text-gray-500 mt-2">
               * 수정 모드에서는 문서 ID 역할(standard_key / domain_code) 변경을 권장하지 않습니다. 변경이 필요하면 삭제 후 재생성 방식이 안전합니다.
@@ -639,21 +602,17 @@ export default function SdtmAdminPage() {
 }
 
 /** -------------------------
- * 테이블 셀 텍스트
+ * 테이블 셀
  * ------------------------ */
 function CellText({ value }: { value: any }) {
   if (value === null || value === undefined) return <span className="text-gray-400">-</span>;
   const s = String(value);
-
-  // ✅ 너무 긴 텍스트는 줄여서 표시
-  if (s.length > 120) {
-    return <span title={s}>{s.slice(0, 120)}…</span>;
-  }
+  if (s.length > 120) return <span title={s}>{s.slice(0, 120)}…</span>;
   return <span>{s}</span>;
 }
 
 /** -------------------------
- * 상세 블록(탭별)
+ * 상세(탭별)
  * ------------------------ */
 function DetailBlock({ tab, row }: { tab: TabKey; row: any }) {
   if (tab === 'catalog') {
@@ -695,7 +654,6 @@ function DetailBlock({ tab, row }: { tab: TabKey; row: any }) {
     );
   }
 
-  // formmap
   return (
     <div className="space-y-2 text-sm">
       <KV k="Form Name Pattern" v={row.form_name_pattern} multiline />
@@ -780,28 +738,19 @@ function Modal({
 }
 
 /** -------------------------
- * 탭별 폼
+ * 폼(탭별)
  * ------------------------ */
 function EditForm({
   tab,
   mode,
   draft,
   setDraft,
-  rows,
 }: {
   tab: TabKey;
   mode: 'create' | 'update';
   draft: any;
   setDraft: (v: any) => void;
-  rows: RowAny[];
 }) {
-  // ✅ formmap 탭에서 suggested_domain_code 선택을 위해 domains 목록 만들기
-  const domainOptions = useMemo(() => {
-    // rows가 현재 탭 데이터일 수 있으므로, 안전하게 별도 조회를 붙이려면 다음 단계에서 개선
-    // 여기서는 최소 구현: 사용자가 formmap 탭에서 도메인 코드를 직접 입력해도 됨
-    return [];
-  }, [rows]);
-
   if (tab === 'catalog') {
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -960,13 +909,6 @@ function EditForm({
         onChange={(v) => setDraft({ ...draft, notes: v })}
         placeholder="메모"
       />
-
-      {/* ✅ 도메인 옵션을 붙이는 기능은 다음 단계에서(안전하게) 개선 */}
-      {domainOptions.length > 0 && (
-        <div className="md:col-span-2 text-xs text-gray-500">
-          (도메인 목록 선택은 다음 단계에서 도메인 컬렉션을 별도 조회하여 셀렉트로 제공합니다.)
-        </div>
-      )}
     </div>
   );
 }
@@ -1023,50 +965,21 @@ function Textarea({
 }
 
 /** -------------------------
- * Draft 초기값
+ * Draft/검증/ID
  * ------------------------ */
 function getEmptyDraft(tab: TabKey) {
   if (tab === 'catalog') {
-    return {
-      standard_key: '',
-      current_version: '',
-      published_date: '',
-      source_org: '',
-      notes: '',
-    } as Partial<StandardsCatalog>;
+    return { standard_key: '', current_version: '', published_date: '', source_org: '', notes: '' };
   }
   if (tab === 'domains') {
-    return {
-      domain_code: '',
-      domain_label: '',
-      domain_class: '',
-      description: '',
-      keywords_csv: '',
-      aliases_csv: '',
-    } as Partial<SdtmDomain>;
+    return { domain_code: '', domain_label: '', domain_class: '', description: '', keywords_csv: '', aliases_csv: '' };
   }
   if (tab === 'codelists') {
-    return {
-      codelist_id: '',
-      codelist_name: '',
-      term_code: '',
-      term_decode: '',
-      synonyms_csv: '',
-      nci_code: '',
-      notes: '',
-    } as Partial<CodeList>;
+    return { codelist_id: '', codelist_name: '', term_code: '', term_decode: '', synonyms_csv: '', nci_code: '', notes: '' };
   }
-  return {
-    form_name_pattern: '',
-    suggested_domain_code: '',
-    confidence_hint: '',
-    notes: '',
-  } as Partial<FormDomainMap>;
+  return { form_name_pattern: '', suggested_domain_code: '', confidence_hint: '', notes: '' };
 }
 
-/** -------------------------
- * 필수값 검증
- * ------------------------ */
 function validateDraft(tab: TabKey, draft: any): { ok: boolean; message: string } {
   if (tab === 'catalog') {
     if (!draft.standard_key?.trim()) return { ok: false, message: 'Standard Key는 필수입니다.' };
@@ -1087,21 +1000,16 @@ function validateDraft(tab: TabKey, draft: any): { ok: boolean; message: string 
   return { ok: true, message: 'OK' };
 }
 
-/** -------------------------
- * 문서 ID 정책
- * ------------------------ */
 function computeDocId(tab: TabKey, draft: any, mode: 'create' | 'update') {
-  // ✅ update 모드에서는 기존 id를 유지
   if (mode === 'update' && draft?.id) return String(draft.id);
 
   if (tab === 'catalog') return String(draft.standard_key).trim();
   if (tab === 'domains') return String(draft.domain_code).trim();
 
-  // codelists/formmap: 자동 ID 대신 “조합키”를 쓰면 중복관리가 편하지만,
-  // 사용자 데이터 특성에 따라 충돌 가능성이 있어 기본은 타임스탬프 기반으로 생성
-  const base = tab === 'codelists'
-    ? `${draft.codelist_id ?? 'CL'}_${draft.term_code ?? 'TERM'}`
-    : `${draft.suggested_domain_code ?? 'DM'}_${(draft.form_name_pattern ?? 'FORM').slice(0, 20)}`;
+  const base =
+    tab === 'codelists'
+      ? `${draft.codelist_id ?? 'CL'}_${draft.term_code ?? 'TERM'}`
+      : `${draft.suggested_domain_code ?? 'DM'}_${(draft.form_name_pattern ?? 'FORM').slice(0, 20)}`;
 
   return `${base}_${Date.now()}`;
 }
