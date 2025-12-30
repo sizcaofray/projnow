@@ -233,7 +233,9 @@ function pickBestScheduleTable($: cheerio.CheerioAPI) {
       .each((_, tr) => {
         $(tr)
           .find("th,td")
-          .each((__, c) => headerCells.push(safeTrim($(c).text())));
+          .each((__, c) => {
+            headerCells.push(safeTrim($(c).text()));
+          });
       });
 
     const visitLikeCount = headerCells.filter((h) => isVisitLikeHeader(h)).length;
