@@ -3,11 +3,17 @@
 /**
  * 📄 app/contents/admin/sdtm/page.tsx
  * - SDTM DB 관리 (A안) : 4개 탭 + 검색/필터 + 테이블 + 상세패널 + CRUD
- * - ✅ (A안 구현) Seed 재적재(관리자): 엑셀 업로드 → 시트별 파싱 → Firestore upsert(writeBatch)
+ * - ✅ Seed 재적재(관리자): 엑셀 업로드 → 시트별 파싱 → Firestore upsert(writeBatch)
+ * - ✅ CDISC 최신 가져오기(관리자): (서버 API) /api/admin/ct-sync 호출 → cdiscCodeLists upsert(writeBatch)
  *
  * ✅ 주의
  * - Firestore Rules에서 아래 컬렉션에 adminLike 접근 허용이 필요합니다:
  *   standardsCatalog, sdtmDomains, cdiscCodeLists, formDomainMap
+ *
+ * ✅ CDISC 최신 가져오기 동작
+ * - “CDISC Library API(키 필요)”가 아니라, 우선 “공개 배포되는 NCI EVS SDTM CT”를
+ *   서버 라우트(/api/admin/ct-sync)에서 내려받아 JSON으로 변환한 뒤,
+ *   이 페이지(관리자 로그인)에서 Firestore에 upsert 합니다.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -242,7 +248,7 @@ export default function SdtmAdminPage() {
   const [loading, setLoading] = useState<boolean>(false);
   const [err, setErr] = useState<string>('');
 
-  // ✅ Seed 업로드 진행 상태(텍스트로 표시)
+  // ✅ Seed/Sync 진행 상태(텍스트로 표시) - Seed, CDISC 최신 가져오기 둘 다 사용
   const [seedStatus, setSeedStatus] = useState<string>('');
 
   // 관리자 가드
@@ -316,7 +322,7 @@ export default function SdtmAdminPage() {
       const colName = getCollectionName(tab);
       const colRef = collection(db, colName);
 
-      // ✅ 기본: updatedAt desc (Seed 업로드 시 updatedAt 넣어줌)
+      // ✅ 기본: updatedAt desc (Seed 업로드/CT 동기화 시 updatedAt 넣어줌)
       const q = query(colRef, orderBy('updatedAt', 'desc'), limit(500));
       const snap = await getDocs(q);
 
@@ -443,7 +449,112 @@ export default function SdtmAdminPage() {
   }
 
   /** -------------------------
-   * 5) ✅ Seed 재적재(관리자) - A안 구현
+   * 5) ✅ CDISC 최신 가져오기(관리자)
+   * - 서버 API(/api/admin/ct-sync) 호출 → items(JSON) 수신
+   * - cdiscCodeLists 컬렉션에 upsert(writeBatch)
+   *
+   * ⚠️ 전제:
+   * - app/api/admin/ct-sync/route.ts 가 프로젝트에 존재해야 합니다.
+   * ------------------------ */
+  async function handleFetchLatestCt() {
+    const ok = confirm(
+      '최신 SDTM Controlled Terminology(CT)를 가져와 cdiscCodeLists에 upsert 하시겠습니까?'
+    );
+    if (!ok) return;
+
+    setErr('');
+    setSeedStatus('CDISC 최신 CT 요청 중...');
+    setLoading(true);
+
+    try {
+      // ✅ 서버 라우트 호출
+      const res = await fetch('/api/admin/ct-sync', {
+        method: 'GET',
+        cache: 'no-store',
+      });
+
+      const json = await res.json();
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.message || 'CT sync API failed');
+      }
+
+      // ✅ route.ts에서 items를 배열로 반환한다고 가정
+      const items = (json.items || []) as Array<{
+        codelist_id: string;
+        codelist_name: string;
+        term_code?: string;
+        term_decode?: string;
+        synonyms_csv?: string;
+        nci_code?: string;
+        notes?: string;
+      }>;
+
+      if (items.length === 0) {
+        alert('가져온 항목이 0건입니다. (원본 형식/컬럼명이 바뀌었을 수 있습니다)');
+        setSeedStatus('CDISC 최신 CT: 0건');
+        return;
+      }
+
+      setSeedStatus(`CT upsert 준비: ${items.length}건`);
+
+      // ✅ Firestore upsert (관리자 로그인 세션으로 수행)
+      const colRef = collection(db, 'cdiscCodeLists');
+
+      // Firestore batch 500 제한 고려
+      const chunkSize = 450;
+      for (let i = 0; i < items.length; i += chunkSize) {
+        const chunk = items.slice(i, i + chunkSize);
+        const batch = writeBatch(db);
+
+        chunk.forEach((r) => {
+          // 문서ID: codelist_id + term_code (없으면 term_decode)
+          const a = sanitizeDocId(r.codelist_id);
+          const b = sanitizeDocId(r.term_code || r.term_decode || 'TERM');
+          if (!a || !b) return;
+
+          const id = `${a}__${b}`.slice(0, 150);
+
+          batch.set(
+            doc(colRef, id),
+            {
+              id,
+              codelist_id: r.codelist_id,
+              codelist_name: r.codelist_name || '',
+              term_code: r.term_code || '',
+              term_decode: r.term_decode || '',
+              synonyms_csv: r.synonyms_csv || '',
+              nci_code: r.nci_code || '',
+              notes: r.notes || 'source=CT_SYNC',
+              updatedAt: Date.now(),
+            },
+            { merge: true } // ✅ upsert
+          );
+        });
+
+        setSeedStatus(
+          `CT upsert 중... (${Math.min(i + chunkSize, items.length)}/${items.length})`
+        );
+        await batch.commit();
+      }
+
+      setSeedStatus(`완료: CT ${items.length}건 upsert`);
+      alert(`완료: CT ${items.length}건 upsert`);
+
+      // ✅ 현재 탭이 codelists면 갱신 체감이 좋지만,
+      //    탭이 달라도 data는 들어가므로 현재 탭 기준 reload를 수행합니다.
+      await loadRows();
+    } catch (e: any) {
+      const msg = e?.message || '최신 CT 가져오기 실패';
+      setErr(msg);
+      setSeedStatus('실패');
+      alert(msg);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /** -------------------------
+   * 6) ✅ Seed 재적재(관리자) - A안 구현
    * - 버튼 클릭 → 파일 선택 → 파싱 → 컬렉션별 upsert(writeBatch)
    * ------------------------ */
   function handleSeedReloadClick() {
@@ -480,7 +591,9 @@ export default function SdtmAdminPage() {
       const mappedSheets = Object.entries(map).filter(([, v]) => !!v) as Array<[string, string]>;
       if (mappedSheets.length === 0) {
         throw new Error(
-          `엑셀 시트를 인식하지 못했습니다. 시트명은 standardsCatalog/sdtmDomains/cdiscCodeLists/formDomainMap 중 하나여야 합니다.\n현재 시트: ${wb.SheetNames.join(', ')}`
+          `엑셀 시트를 인식하지 못했습니다. 시트명은 standardsCatalog/sdtmDomains/cdiscCodeLists/formDomainMap 중 하나여야 합니다.\n현재 시트: ${wb.SheetNames.join(
+            ', '
+          )}`
         );
       }
 
@@ -663,12 +776,20 @@ export default function SdtmAdminPage() {
       <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">SDTM DB 관리</h1>
-          <p className="text-sm text-gray-500">
-            Standards/Domain/CodeList/FormMap 기준 데이터를 관리합니다.
-          </p>
+          <p className="text-sm text-gray-500">Standards/Domain/CodeList/FormMap 기준 데이터를 관리합니다.</p>
         </div>
 
         <div className="flex gap-2">
+          {/* ✅ 추가: CDISC 최신 가져오기 */}
+          <button
+            onClick={handleFetchLatestCt}
+            className="px-3 py-2 rounded border hover:bg-gray-50 dark:hover:bg-gray-800 text-sm"
+            disabled={loading}
+            title="서버(/api/admin/ct-sync)에서 최신 SDTM CT를 가져와 cdiscCodeLists에 upsert 합니다."
+          >
+            CDISC 최신 가져오기
+          </button>
+
           <button
             onClick={handleSeedReloadClick}
             className="px-3 py-2 rounded border hover:bg-gray-50 dark:hover:bg-gray-800 text-sm"
@@ -677,6 +798,7 @@ export default function SdtmAdminPage() {
           >
             Seed 재적재(관리자)
           </button>
+
           <button
             onClick={openCreate}
             className="px-3 py-2 rounded bg-black text-white dark:bg-white dark:text-black text-sm"
@@ -701,12 +823,8 @@ export default function SdtmAdminPage() {
         </div>
       </div>
 
-      {/* ✅ Seed 상태 표시(텍스트만 추가: 기존 UI 영향 최소) */}
-      {seedStatus && (
-        <div className="text-xs text-gray-500">
-          Seed: {seedStatus}
-        </div>
-      )}
+      {/* ✅ 진행 상태 표시(텍스트만 추가: 기존 UI 영향 최소) */}
+      {seedStatus && <div className="text-xs text-gray-500">Status: {seedStatus}</div>}
 
       {/* 탭 */}
       <div className="flex gap-2 flex-wrap">
@@ -720,9 +838,7 @@ export default function SdtmAdminPage() {
             }}
             className={[
               'px-3 py-2 rounded text-sm border',
-              tab === k
-                ? 'bg-black text-white dark:bg-white dark:text-black'
-                : 'hover:bg-gray-50 dark:hover:bg-gray-800',
+              tab === k ? 'bg-black text-white dark:bg-white dark:text-black' : 'hover:bg-gray-50 dark:hover:bg-gray-800',
             ].join(' ')}
           >
             {TAB_LABEL[k]}
@@ -753,9 +869,7 @@ export default function SdtmAdminPage() {
           </select>
         )}
 
-        <div className="text-sm text-gray-500">
-          총 {filteredRows.length}건 {loading ? '(로딩 중...)' : ''}
-        </div>
+        <div className="text-sm text-gray-500">총 {filteredRows.length}건 {loading ? '(로딩 중...)' : ''}</div>
       </div>
 
       {/* 에러 */}
@@ -1239,7 +1353,8 @@ function Textarea({
  * Draft/검증/ID
  * ------------------------ */
 function getEmptyDraft(tab: TabKey) {
-  if (tab === 'catalog') return { standard_key: '', current_version: '', published_date: '', source_org: '', notes: '' };
+  if (tab === 'catalog')
+    return { standard_key: '', current_version: '', published_date: '', source_org: '', notes: '' };
   if (tab === 'domains')
     return { domain_code: '', domain_label: '', domain_class: '', description: '', keywords_csv: '', aliases_csv: '' };
   if (tab === 'codelists')
