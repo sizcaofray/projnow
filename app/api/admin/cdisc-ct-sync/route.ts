@@ -8,6 +8,10 @@
 //  - Vercel env의 private key가 줄바꿈/ \n 형태 모두 들어올 수 있어 둘 다 처리
 // -------------------------------------------------------------
 
+export const runtime = "nodejs";
+export const maxDuration = 60;
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import { getApps, initializeApp, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
