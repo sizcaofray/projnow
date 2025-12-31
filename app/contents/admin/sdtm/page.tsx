@@ -251,6 +251,9 @@ export default function SdtmAdminPage() {
   // ✅ Seed/Sync 진행 상태(텍스트로 표시) - Seed, CDISC 최신 가져오기 둘 다 사용
   const [seedStatus, setSeedStatus] = useState<string>('');
 
+  // ✅ (추가) CT Sync 디버그 출력용
+  const [ctDebug, setCtDebug] = useState<any>(null);
+
   // 관리자 가드
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
   const [checking, setChecking] = useState<boolean>(true);
@@ -463,6 +466,7 @@ export default function SdtmAdminPage() {
     if (!ok) return;
 
     setErr('');
+    setCtDebug(null); // ✅ (추가) 이전 디버그 초기화
     setSeedStatus('CDISC 최신 CT 요청 중...');
     setLoading(true);
 
@@ -474,7 +478,14 @@ export default function SdtmAdminPage() {
       });
 
       const json = await res.json();
+
+      // ✅ (추가) 서버 응답을 콘솔에 남겨 원인 추적
+      console.log('[CT-SYNC] response status:', res.status, res.statusText);
+      console.log('[CT-SYNC] response json:', json);
+
       if (!res.ok || !json?.ok) {
+        // ✅ (추가) 실패 응답도 화면에서 볼 수 있게 저장
+        setCtDebug(json);
         throw new Error(json?.message || 'CT sync API failed');
       }
 
@@ -490,7 +501,9 @@ export default function SdtmAdminPage() {
       }>;
 
       if (items.length === 0) {
-        alert('가져온 항목이 0건입니다. (원본 형식/컬럼명이 바뀌었을 수 있습니다)');
+        // ✅ (추가) 0건이면 debug payload를 화면에 출력하도록 저장
+        setCtDebug(json);
+        alert('가져온 항목이 0건입니다. 아래 Debug 정보를 확인하세요.');
         setSeedStatus('CDISC 최신 CT: 0건');
         return;
       }
@@ -825,6 +838,14 @@ export default function SdtmAdminPage() {
 
       {/* ✅ 진행 상태 표시(텍스트만 추가: 기존 UI 영향 최소) */}
       {seedStatus && <div className="text-xs text-gray-500">Status: {seedStatus}</div>}
+
+      {/* ✅ (추가) 0건/실패 시 Debug JSON 출력 */}
+      {ctDebug && (
+        <div className="mt-3 p-3 border rounded text-xs bg-neutral-50 dark:bg-neutral-900 overflow-auto max-h-[300px]">
+          <div className="font-semibold mb-2">CT Sync Debug</div>
+          <pre className="whitespace-pre-wrap break-words">{JSON.stringify(ctDebug, null, 2)}</pre>
+        </div>
+      )}
 
       {/* 탭 */}
       <div className="flex gap-2 flex-wrap">
