@@ -3,20 +3,17 @@
 /**
  * 📄 app/contents/admin/sdtm/page.tsx
  * - SDTM DB 관리 (A안) : 4개 탭 + 검색/필터 + 테이블 + 상세패널 + CRUD
- * - Firestore 컬렉션(기본): standardsCatalog, sdtmDomains, cdiscCodeLists, formDomainMap
- * - 관리자만 접근(클라이언트 가드) : users/{uid}.role === 'admin' 가정
+ * - ✅ (A안 구현) Seed 재적재(관리자): 엑셀 업로드 → 시트별 파싱 → Firestore upsert(writeBatch)
  *
- * ✅ 수정사항(빌드 에러 대응)
- * - "@/lib/firebase/firebase" 에 auth export가 없으므로 auth import 제거
- * - getAuth() + onAuthStateChanged()로 유저 확보
+ * ✅ 주의
+ * - Firestore Rules에서 아래 컬렉션에 adminLike 접근 허용이 필요합니다:
+ *   standardsCatalog, sdtmDomains, cdiscCodeLists, formDomainMap
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import { getAuth, onAuthStateChanged } from 'firebase/auth';
-
-// ✅ Firebase Firestore export는 db만 사용 (프로젝트 구조에 맞는 경로 유지)
 import { db } from '@/lib/firebase/firebase';
 
 import {
@@ -30,7 +27,11 @@ import {
   query,
   setDoc,
   updateDoc,
+  writeBatch,
 } from 'firebase/firestore';
+
+// ✅ xlsx 라이브러리(Seed 업로드 파싱용)
+import * as XLSX from 'xlsx';
 
 /** -------------------------
  * 타입 정의(탭별)
@@ -93,6 +94,25 @@ function safeLower(s: string) {
 function includesAny(text: string, keywords: string[]) {
   const t = safeLower(text);
   return keywords.some((k) => t.includes(safeLower(k)));
+}
+
+/**
+ * Firestore 문서 ID에 쓸 수 없는 문자 제거
+ * - Firestore docId는 "/" 포함 불가
+ */
+function sanitizeDocId(input: string) {
+  const s = String(input ?? '').trim();
+  if (!s) return '';
+  // "/" 제거 + 제어문자 제거
+  return s
+    .replaceAll('/', '_')
+    .replaceAll('\\', '_')
+    .replaceAll('#', '_')
+    .replaceAll('?', '_')
+    .replaceAll('[', '(')
+    .replaceAll(']', ')')
+    .replace(/\s+/g, ' ')
+    .slice(0, 150);
 }
 
 /** -------------------------
@@ -160,6 +180,53 @@ function getCollectionName(tab: TabKey) {
 }
 
 /** -------------------------
+ * 엑셀 시트 → 컬렉션 매핑
+ * - 시트명이 정확히 일치하면 그대로 사용
+ * - 다르면 "유사한 이름"을 찾아 매핑(최소 보정)
+ * ------------------------ */
+function normalizeSheetName(name: string) {
+  return String(name ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replaceAll('-', '')
+    .replaceAll('_', '');
+}
+
+function buildSheetMap(sheetNames: string[]) {
+  // 기본 기대 시트명(컬렉션명과 동일)
+  const target = {
+    standardsCatalog: ['standardscatalog', 'catalog', 'standards'],
+    sdtmDomains: ['sdtmdomains', 'domains', 'sdtmdomain'],
+    cdiscCodeLists: ['cdisccodelists', 'codelists', 'cdisc', 'codelist'],
+    formDomainMap: ['formdomainmap', 'formmap', 'form-domain-map', 'formdomain'],
+  };
+
+  const normalized = sheetNames.map((s) => ({ raw: s, norm: normalizeSheetName(s) }));
+
+  // 각 컬렉션에 가장 먼저 매칭되는 시트를 찾음
+  const pick = (aliases: string[]) => {
+    for (const a of aliases) {
+      const found = normalized.find((x) => x.norm === a);
+      if (found) return found.raw;
+    }
+    // 부분 일치도 허용(최소 보정)
+    for (const a of aliases) {
+      const found = normalized.find((x) => x.norm.includes(a) || a.includes(x.norm));
+      if (found) return found.raw;
+    }
+    return null;
+  };
+
+  return {
+    standardsCatalog: pick(target.standardsCatalog),
+    sdtmDomains: pick(target.sdtmDomains),
+    cdiscCodeLists: pick(target.cdiscCodeLists),
+    formDomainMap: pick(target.formDomainMap),
+  };
+}
+
+/** -------------------------
  * 메인 컴포넌트
  * ------------------------ */
 export default function SdtmAdminPage() {
@@ -175,6 +242,9 @@ export default function SdtmAdminPage() {
   const [loading, setLoading] = useState<boolean>(false);
   const [err, setErr] = useState<string>('');
 
+  // ✅ Seed 업로드 진행 상태(텍스트로 표시)
+  const [seedStatus, setSeedStatus] = useState<string>('');
+
   // 관리자 가드
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
   const [checking, setChecking] = useState<boolean>(true);
@@ -187,27 +257,26 @@ export default function SdtmAdminPage() {
   const [editMode, setEditMode] = useState<'create' | 'update'>('create');
   const [draft, setDraft] = useState<any>({});
 
+  // ✅ 파일 input (UI 변경 최소화를 위해 숨김 처리)
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
   /** -------------------------
    * 1) 관리자 여부 확인
-   * - auth export를 쓰지 않고 getAuth() + onAuthStateChanged() 사용
    * ------------------------ */
   useEffect(() => {
     const auth = getAuth();
 
-    // 로그인 상태 변경 감지
     const unsub = onAuthStateChanged(auth, async (user) => {
       setChecking(true);
 
       try {
         if (!user) {
-          // 비로그인: 정책에 따라 홈으로 이동
           setIsAdmin(false);
           setChecking(false);
           router.replace('/');
           return;
         }
 
-        // users/{uid}.role 확인
         const uref = doc(db, 'users', user.uid);
         const usnap = await getDoc(uref);
         const roleRaw = usnap.exists() ? (usnap.data() as any)?.role : '';
@@ -217,7 +286,6 @@ export default function SdtmAdminPage() {
         setIsAdmin(ok);
         setChecking(false);
 
-        // 관리자가 아니면 접근 차단
         if (!ok) router.replace('/contents');
       } catch (e: any) {
         setIsAdmin(false);
@@ -248,13 +316,12 @@ export default function SdtmAdminPage() {
       const colName = getCollectionName(tab);
       const colRef = collection(db, colName);
 
-      // 기본: updatedAt desc, 최대 500
+      // ✅ 기본: updatedAt desc (Seed 업로드 시 updatedAt 넣어줌)
       const q = query(colRef, orderBy('updatedAt', 'desc'), limit(500));
       const snap = await getDocs(q);
 
       const list: any[] = [];
       snap.forEach((d) => list.push({ id: d.id, ...(d.data() as any) }));
-
       setRows(list);
     } catch (e: any) {
       setErr(e?.message ?? '데이터 로딩 중 오류가 발생했습니다.');
@@ -375,10 +442,194 @@ export default function SdtmAdminPage() {
     }
   }
 
-  function handleSeedReload() {
-    alert(
-      'Seed 재적재는 다음 단계에서 엑셀 업로드 → 시트 파싱 → 컬렉션별 upsert로 안전하게 구현하겠습니다.\n(현재는 UI/컬럼 구조(A안) 확정 단계입니다.)'
-    );
+  /** -------------------------
+   * 5) ✅ Seed 재적재(관리자) - A안 구현
+   * - 버튼 클릭 → 파일 선택 → 파싱 → 컬렉션별 upsert(writeBatch)
+   * ------------------------ */
+  function handleSeedReloadClick() {
+    // UI 변경 최소화를 위해 input을 숨겨두고 클릭만 트리거
+    if (!fileRef.current) return;
+    fileRef.current.value = '';
+    fileRef.current.click();
+  }
+
+  async function handleSeedFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // 간단 검증
+    const name = file.name.toLowerCase();
+    if (!name.endsWith('.xlsx') && !name.endsWith('.xls')) {
+      alert('엑셀 파일(.xlsx/.xls)만 업로드 가능합니다.');
+      return;
+    }
+
+    setErr('');
+    setSeedStatus(`업로드 파일 읽는 중: ${file.name}`);
+    setLoading(true);
+
+    try {
+      // 1) 엑셀 읽기
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array' });
+
+      // 2) 시트 매핑 결정
+      const map = buildSheetMap(wb.SheetNames);
+
+      // 필수 시트 체크(최소 1개라도 있으면 진행)
+      const mappedSheets = Object.entries(map).filter(([, v]) => !!v) as Array<[string, string]>;
+      if (mappedSheets.length === 0) {
+        throw new Error(
+          `엑셀 시트를 인식하지 못했습니다. 시트명은 standardsCatalog/sdtmDomains/cdiscCodeLists/formDomainMap 중 하나여야 합니다.\n현재 시트: ${wb.SheetNames.join(', ')}`
+        );
+      }
+
+      setSeedStatus(`시트 확인됨: ${mappedSheets.map(([k, v]) => `${k}←${v}`).join(' / ')}`);
+
+      // 3) 컬렉션별 rows 추출 + upsert
+      let totalUpsert = 0;
+
+      // ✅ 컬렉션 처리 순서(의미상)
+      const processOrder: Array<keyof typeof map> = [
+        'standardsCatalog',
+        'sdtmDomains',
+        'cdiscCodeLists',
+        'formDomainMap',
+      ];
+
+      for (const colName of processOrder) {
+        const sheetName = (map as any)[colName] as string | null;
+        if (!sheetName) continue;
+
+        const ws = wb.Sheets[sheetName];
+        if (!ws) continue;
+
+        // 4) JSON 변환
+        // defval: '' 로 비어있는 셀도 키 유지
+        const rowsJson = XLSX.utils.sheet_to_json<Record<string, any>>(ws, {
+          defval: '',
+          raw: true,
+        });
+
+        if (!rowsJson || rowsJson.length === 0) continue;
+
+        setSeedStatus(`적재 준비: ${colName} (${rowsJson.length}행)`);
+
+        // 5) writeBatch upsert (500개 제한 고려)
+        const colRef = collection(db, colName);
+        const chunks: Array<Array<Record<string, any>>> = [];
+        for (let i = 0; i < rowsJson.length; i += 450) {
+          // 450: 안전 버퍼(필드가 많아도 안정)
+          chunks.push(rowsJson.slice(i, i + 450));
+        }
+
+        for (let ci = 0; ci < chunks.length; ci++) {
+          const batch = writeBatch(db);
+
+          chunks[ci].forEach((r) => {
+            const cleaned = normalizeRow(colName, r);
+
+            // 문서ID 계산
+            const id = computeSeedDocId(colName, cleaned);
+            if (!id) return; // ID 못 만들면 skip
+
+            const ref = doc(colRef, id);
+
+            batch.set(
+              ref,
+              {
+                ...cleaned,
+                id,
+                updatedAt: nowTs(),
+              },
+              { merge: true } // ✅ upsert
+            );
+          });
+
+          setSeedStatus(`적재 중: ${colName} (batch ${ci + 1}/${chunks.length})`);
+          await batch.commit();
+        }
+
+        totalUpsert += rowsJson.length;
+      }
+
+      setSeedStatus(`완료: 총 ${totalUpsert}행 upsert 완료`);
+      alert(`Seed 재적재 완료: 총 ${totalUpsert}행 upsert 되었습니다.`);
+
+      // 현재 탭 다시 로드
+      await loadRows();
+    } catch (e: any) {
+      const msg = e?.message ?? 'Seed 재적재 중 오류가 발생했습니다.';
+      setErr(msg);
+      setSeedStatus('실패');
+      alert(msg);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /**
+   * 컬렉션별 row 정규화
+   * - 키 공백 제거, undefined/null 처리
+   */
+  function normalizeRow(colName: string, row: Record<string, any>) {
+    const out: Record<string, any> = {};
+
+    Object.entries(row ?? {}).forEach(([k, v]) => {
+      const key = String(k ?? '').trim();
+      if (!key) return;
+
+      // 값 정리
+      let val: any = v;
+      if (val === undefined || val === null) val = '';
+
+      // 날짜 셀 등이 number로 들어오는 경우가 있어도 그대로 저장(필요시 다음 단계에서 변환)
+      out[key] = typeof val === 'string' ? val.trim() : val;
+    });
+
+    // ID 필드가 들어있으면 무시(우리 정책이 우선)
+    delete out.id;
+
+    // 컬렉션 기대 필드가 아닌 값이 있어도 merge:true라 운영상 문제는 없지만,
+    // 다음 단계에서 스키마 엄격화가 필요하면 여기서 필드 필터링 가능
+    return out;
+  }
+
+  /**
+   * Seed 업로드용 문서ID 계산
+   * - 컬렉션명 기반으로 정책 적용
+   */
+  function computeSeedDocId(colName: string, row: Record<string, any>) {
+    // standardsCatalog: standard_key
+    if (colName === 'standardsCatalog') {
+      return sanitizeDocId(row.standard_key);
+    }
+
+    // sdtmDomains: domain_code
+    if (colName === 'sdtmDomains') {
+      return sanitizeDocId(row.domain_code);
+    }
+
+    // cdiscCodeLists: codelist_id + term_code (없으면 자동)
+    if (colName === 'cdiscCodeLists') {
+      const a = sanitizeDocId(row.codelist_id);
+      const b = sanitizeDocId(row.term_code);
+      if (a && b) return `${a}__${b}`;
+      if (a) return `${a}__${sanitizeDocId(row.term_decode) || 'TERM'}__${nowTs()}`;
+      return `CL__${nowTs()}`;
+    }
+
+    // formDomainMap: suggested_domain_code + form_name_pattern (없으면 자동)
+    if (colName === 'formDomainMap') {
+      const a = sanitizeDocId(row.suggested_domain_code);
+      const b = sanitizeDocId(row.form_name_pattern);
+      if (a && b) return `${a}__${b}`.slice(0, 150);
+      if (b) return `MAP__${b}__${nowTs()}`.slice(0, 150);
+      return `MAP__${nowTs()}`;
+    }
+
+    // fallback
+    return sanitizeDocId(row.id) || `DOC__${nowTs()}`;
   }
 
   /** -------------------------
@@ -399,6 +650,15 @@ export default function SdtmAdminPage() {
 
   return (
     <main className="p-6 space-y-4">
+      {/* ✅ 숨김 파일 input (UI 변경 최소화) */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".xlsx,.xls"
+        className="hidden"
+        onChange={handleSeedFileChange}
+      />
+
       {/* 제목 */}
       <div className="flex items-center justify-between gap-3">
         <div>
@@ -410,33 +670,43 @@ export default function SdtmAdminPage() {
 
         <div className="flex gap-2">
           <button
-            onClick={handleSeedReload}
+            onClick={handleSeedReloadClick}
             className="px-3 py-2 rounded border hover:bg-gray-50 dark:hover:bg-gray-800 text-sm"
+            disabled={loading}
+            title="엑셀 업로드로 Seed 데이터를 Firestore에 upsert 합니다."
           >
             Seed 재적재(관리자)
           </button>
           <button
             onClick={openCreate}
             className="px-3 py-2 rounded bg-black text-white dark:bg-white dark:text-black text-sm"
+            disabled={loading}
           >
             추가
           </button>
           <button
             onClick={openUpdate}
-            disabled={!selected}
+            disabled={!selected || loading}
             className="px-3 py-2 rounded border text-sm disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-800"
           >
             수정
           </button>
           <button
             onClick={handleDelete}
-            disabled={!selected}
+            disabled={!selected || loading}
             className="px-3 py-2 rounded border text-sm disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-800"
           >
             삭제
           </button>
         </div>
       </div>
+
+      {/* ✅ Seed 상태 표시(텍스트만 추가: 기존 UI 영향 최소) */}
+      {seedStatus && (
+        <div className="text-xs text-gray-500">
+          Seed: {seedStatus}
+        </div>
+      )}
 
       {/* 탭 */}
       <div className="flex gap-2 flex-wrap">
@@ -561,12 +831,14 @@ export default function SdtmAdminPage() {
                 <button
                   onClick={openUpdate}
                   className="px-3 py-2 rounded border text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
+                  disabled={loading}
                 >
                   수정
                 </button>
                 <button
                   onClick={handleDelete}
                   className="px-3 py-2 rounded border text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
+                  disabled={loading}
                 >
                   삭제
                 </button>
@@ -882,7 +1154,6 @@ function EditForm({
     );
   }
 
-  // formmap
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
       <Textarea
@@ -901,7 +1172,7 @@ function EditForm({
         label="Confidence Hint"
         value={draft.confidence_hint ?? ''}
         onChange={(v) => setDraft({ ...draft, confidence_hint: v })}
-        placeholder='예: high / med / low 또는 0.8'
+        placeholder="예: high / med / low 또는 0.8"
       />
       <Textarea
         label="Notes"
@@ -968,15 +1239,11 @@ function Textarea({
  * Draft/검증/ID
  * ------------------------ */
 function getEmptyDraft(tab: TabKey) {
-  if (tab === 'catalog') {
-    return { standard_key: '', current_version: '', published_date: '', source_org: '', notes: '' };
-  }
-  if (tab === 'domains') {
+  if (tab === 'catalog') return { standard_key: '', current_version: '', published_date: '', source_org: '', notes: '' };
+  if (tab === 'domains')
     return { domain_code: '', domain_label: '', domain_class: '', description: '', keywords_csv: '', aliases_csv: '' };
-  }
-  if (tab === 'codelists') {
+  if (tab === 'codelists')
     return { codelist_id: '', codelist_name: '', term_code: '', term_decode: '', synonyms_csv: '', nci_code: '', notes: '' };
-  }
   return { form_name_pattern: '', suggested_domain_code: '', confidence_hint: '', notes: '' };
 }
 
@@ -1003,13 +1270,13 @@ function validateDraft(tab: TabKey, draft: any): { ok: boolean; message: string 
 function computeDocId(tab: TabKey, draft: any, mode: 'create' | 'update') {
   if (mode === 'update' && draft?.id) return String(draft.id);
 
-  if (tab === 'catalog') return String(draft.standard_key).trim();
-  if (tab === 'domains') return String(draft.domain_code).trim();
+  if (tab === 'catalog') return sanitizeDocId(String(draft.standard_key).trim());
+  if (tab === 'domains') return sanitizeDocId(String(draft.domain_code).trim());
 
   const base =
     tab === 'codelists'
-      ? `${draft.codelist_id ?? 'CL'}_${draft.term_code ?? 'TERM'}`
-      : `${draft.suggested_domain_code ?? 'DM'}_${(draft.form_name_pattern ?? 'FORM').slice(0, 20)}`;
+      ? `${sanitizeDocId(draft.codelist_id ?? 'CL')}__${sanitizeDocId(draft.term_code ?? 'TERM')}`
+      : `${sanitizeDocId(draft.suggested_domain_code ?? 'DM')}__${sanitizeDocId((draft.form_name_pattern ?? 'FORM').slice(0, 20))}`;
 
-  return `${base}_${Date.now()}`;
+  return `${base}__${Date.now()}`.slice(0, 150);
 }
