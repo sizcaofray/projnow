@@ -3,20 +3,13 @@
 /**
  * app/contents/menu/page.tsx
  *
- * ✅ 추가 요구사항 반영
- * - 메뉴 접근 등급(access) 추가:
- *   disabled / public / paid / admin
+ * ✅ 수정사항
+ * - select/input의 텍스트 색상이 브라우저 기본값을 타서 다크모드에서 안 보이는 문제 해결
+ * - 모든 input/select에 bg/text/border dark variant 명시
  *
- * ✅ 호환 유지(중요)
- * - 기존 필드 isActive/adminOnly 를 완전히 제거하지 않고,
- *   access 값으로부터 자동 계산하여 함께 저장합니다.
- *   (기존 Sidebar/권한 로직이 isActive/adminOnly를 쓰고 있을 가능성 대비)
- *
- * ✅ 기존 요구사항 유지
- * - 목록 Row의 "같은레벨 추가 / 하위메뉴" 버튼 없음
- * - 계층 지정은 "상위 메뉴(소속)" select로만 처리
- * - 최초 로드 시 자식이 있는 부모 메뉴 expanded 자동 펼침
- * - 기능(페이지) 메뉴 삭제 시 수동 파일 정리 confirm 유지
+ * ✅ 기능사항 유지
+ * - 메뉴 접근 등급(access) 유지
+ * - 기존 필드(isActive/adminOnly/paidOnly) 호환 유지
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -115,6 +108,26 @@ const inferAccessFromLegacy = (v: any): MenuAccess => {
   if (paidOnly) return "paid";
   return "public";
 };
+
+/**
+ * ✅ 공통 입력 UI 클래스
+ * - select 옵션 텍스트가 다크에서 안 보이는 문제를 막기 위해 text 색상 명시
+ * - 배경/보더도 다크 variant 지정
+ */
+const INPUT_CLASS =
+  "mt-1 w-full rounded-lg border px-3 py-2 " +
+  "bg-white text-gray-900 border-gray-200 " +
+  "dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800 " +
+  "focus:outline-none focus:ring-2 focus:ring-gray-300 dark:focus:ring-gray-700";
+
+const READONLY_CLASS =
+  "mt-1 w-full rounded-lg border px-3 py-2 " +
+  "bg-gray-50 text-gray-700 border-gray-200 " +
+  "dark:bg-gray-900 dark:text-gray-200 dark:border-gray-800 " +
+  "focus:outline-none";
+
+const DISABLED_CLASS =
+  "disabled:bg-gray-50 disabled:text-gray-500 dark:disabled:bg-gray-900 dark:disabled:text-gray-400";
 
 export default function MenuManagePage() {
   const { user, loading, initError } = useAuth();
@@ -256,7 +269,6 @@ export default function MenuManagePage() {
 
       /**
        * ✅ 최초 1회만: "자식이 있는 모든 부모 메뉴"를 expanded=true로 자동 펼침
-       * - 중간 카테고리가 접혀서 하위 기능 메뉴가 리스트에서 사라지는 문제 방지
        */
       setExpanded((prev) => {
         if (Object.keys(prev).length > 0) return prev;
@@ -648,7 +660,7 @@ export default function MenuManagePage() {
               <input
                 value={form.name}
                 onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
-                className="mt-1 w-full rounded-lg border px-3 py-2"
+                className={INPUT_CLASS}
               />
             </label>
 
@@ -660,7 +672,7 @@ export default function MenuManagePage() {
                   const nextHasPage = e.target.value === "page";
                   setForm((p) => ({ ...p, hasPage: nextHasPage, slug: nextHasPage ? p.slug : "" }));
                 }}
-                className="mt-1 w-full rounded-lg border px-3 py-2"
+                className={INPUT_CLASS}
               >
                 <option value="category">카테고리(페이지 없음)</option>
                 <option value="page">기능(페이지 있음)</option>
@@ -673,17 +685,13 @@ export default function MenuManagePage() {
                 value={form.slug}
                 onChange={(e) => setForm((p) => ({ ...p, slug: normalizeSlug(e.target.value) }))}
                 disabled={!form.hasPage}
-                className="mt-1 w-full rounded-lg border px-3 py-2 disabled:bg-gray-50 dark:disabled:bg-gray-900"
+                className={`${INPUT_CLASS} ${DISABLED_CLASS}`}
               />
             </label>
 
             <label className="text-sm">
               생성 경로(path)
-              <input
-                value={previewPath}
-                readOnly
-                className="mt-1 w-full rounded-lg border bg-gray-50 px-3 py-2 text-gray-700 dark:bg-gray-900 dark:text-gray-200"
-              />
+              <input value={previewPath} readOnly className={READONLY_CLASS} />
             </label>
 
             <label className="text-sm">
@@ -691,7 +699,7 @@ export default function MenuManagePage() {
               <select
                 value={form.parentId ?? ""}
                 onChange={(e) => setForm((p) => ({ ...p, parentId: e.target.value ? e.target.value : null }))}
-                className="mt-1 w-full rounded-lg border px-3 py-2"
+                className={INPUT_CLASS}
               >
                 {parentOptions.map((o) => (
                   <option key={String(o.id ?? "null")} value={o.id ?? ""}>
@@ -706,7 +714,7 @@ export default function MenuManagePage() {
               <input
                 value={form.group}
                 onChange={(e) => setForm((p) => ({ ...p, group: e.target.value }))}
-                className="mt-1 w-full rounded-lg border px-3 py-2"
+                className={INPUT_CLASS}
               />
             </label>
 
@@ -716,7 +724,7 @@ export default function MenuManagePage() {
               <select
                 value={form.access}
                 onChange={(e) => setForm((p) => ({ ...p, access: e.target.value as MenuAccess }))}
-                className="mt-1 w-full rounded-lg border px-3 py-2"
+                className={INPUT_CLASS}
               >
                 <option value="disabled">비활성화</option>
                 <option value="public">일반(전체)</option>
@@ -789,7 +797,7 @@ export default function MenuManagePage() {
                   <input
                     value={edit.name}
                     onChange={(e) => setEdit((p) => ({ ...p, name: e.target.value }))}
-                    className="mt-1 w-full rounded-lg border px-3 py-2"
+                    className={INPUT_CLASS}
                   />
                 </label>
 
@@ -801,7 +809,7 @@ export default function MenuManagePage() {
                       const nextHasPage = e.target.value === "page";
                       setEdit((p) => ({ ...p, hasPage: nextHasPage, slug: nextHasPage ? p.slug : "" }));
                     }}
-                    className="mt-1 w-full rounded-lg border px-3 py-2"
+                    className={INPUT_CLASS}
                   >
                     <option value="category">카테고리(페이지 없음)</option>
                     <option value="page">기능(페이지 있음)</option>
@@ -814,17 +822,13 @@ export default function MenuManagePage() {
                     value={edit.slug}
                     onChange={(e) => setEdit((p) => ({ ...p, slug: normalizeSlug(e.target.value) }))}
                     disabled={editOriginalHasPage || !edit.hasPage}
-                    className="mt-1 w-full rounded-lg border px-3 py-2 disabled:bg-gray-50 dark:disabled:bg-gray-900"
+                    className={`${INPUT_CLASS} ${DISABLED_CLASS}`}
                   />
                 </label>
 
                 <label className="text-sm">
                   생성 경로(path)
-                  <input
-                    value={previewEditPath}
-                    readOnly
-                    className="mt-1 w-full rounded-lg border bg-gray-50 px-3 py-2 text-gray-700 dark:bg-gray-900 dark:text-gray-200"
-                  />
+                  <input value={previewEditPath} readOnly className={READONLY_CLASS} />
                 </label>
 
                 <label className="text-sm">
@@ -832,7 +836,7 @@ export default function MenuManagePage() {
                   <select
                     value={edit.parentId ?? ""}
                     onChange={(e) => setEdit((p) => ({ ...p, parentId: e.target.value ? e.target.value : null }))}
-                    className="mt-1 w-full rounded-lg border px-3 py-2"
+                    className={INPUT_CLASS}
                   >
                     {parentOptions
                       .filter((o) => o.id !== editId)
@@ -849,7 +853,7 @@ export default function MenuManagePage() {
                   <input
                     value={edit.group}
                     onChange={(e) => setEdit((p) => ({ ...p, group: e.target.value }))}
-                    className="mt-1 w-full rounded-lg border px-3 py-2"
+                    className={INPUT_CLASS}
                   />
                 </label>
 
@@ -859,7 +863,7 @@ export default function MenuManagePage() {
                   <select
                     value={edit.access}
                     onChange={(e) => setEdit((p) => ({ ...p, access: e.target.value as MenuAccess }))}
-                    className="mt-1 w-full rounded-lg border px-3 py-2"
+                    className={INPUT_CLASS}
                   >
                     <option value="disabled">비활성화</option>
                     <option value="public">일반(전체)</option>
