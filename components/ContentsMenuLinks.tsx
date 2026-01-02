@@ -3,18 +3,14 @@
 /**
  * components/ContentsMenuLinks.tsx
  *
- * ✅ 변경 요구사항 반영
- * - "비활성화"는 기능이 있는 메뉴(hasPage=true)만 적용
- * - 카테고리(hasPage=false), 특히 최상위 카테고리는 비활성화 대상 아님
- * - 비활성 기능 메뉴는 hover/클릭 반응 없음(완전 무반응)
+ * ✅ 반영 사항(이번 요청)
+ * - 최상위 카테고리(parentId === null)는 비활성화 대상 아님(항상 활성)
+ * - 최상위 제외 하위 카테고리(parentId !== null) 중,
+ *   하위에 메뉴가 "아예 없는" 카테고리(children 0개)는 비활성 표시 + 무반응
  *
- * ✅ 기존 구조 유지
- * - 좌측: 카테고리 트리만 표시
- * - 우측(옆) 패널: 오버된 카테고리의 직계 자식 중 "기능 메뉴"만 표시
- *
- * ✅ 권한/활성 필터
- * - 기능 메뉴: isActive && (adminOnly ? isAdmin : true) 조건으로 활성/비활성 판정
- * - 카테고리: 표시/동작에 비활성 조건 적용하지 않음
+ * ✅ 기존 유지
+ * - 비활성화는 기능 메뉴(hasPage=true)에는 그대로 적용(isActive/adminOnly)
+ * - 좌측: 카테고리 트리, 우측(옆) 패널: 오버된 카테고리의 직계 기능 메뉴 표시
  */
 
 import Link from "next/link";
@@ -38,7 +34,6 @@ type MenuDoc = {
 const COL = "menus";
 
 export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
-  // ✅ props 누락 대비(빌드 안정)
   const isAdmin = Boolean(props?.isAdmin);
 
   const db = useMemo(() => {
@@ -51,10 +46,10 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
 
   const [menus, setMenus] = useState<MenuDoc[]>([]);
 
-  // ✅ 좌측 트리(카테고리) 펼침 상태
+  // ✅ 카테고리 트리 펼침 상태
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
-  // ✅ 옆 패널 상태: "오버된 카테고리"
+  // ✅ 옆 패널: 오버된 카테고리
   const [hoverCategoryId, setHoverCategoryId] = useState<string | null>(null);
   const [panelTop, setPanelTop] = useState(0);
 
@@ -95,26 +90,16 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
 
         setMenus(rows);
 
-        // ✅ 최초 1회만: 자식 카테고리가 있는 카테고리를 기본 펼침
+        // ✅ 최초 1회만: 최상위 카테고리 기본 펼침
         setExpanded((prev) => {
           if (Object.keys(prev).length > 0) return prev;
 
-          const categories = rows.filter((m) => !m.hasPage);
-          const catIds = new Set(categories.map((c) => c.id));
-
-          // 자식이 "카테고리"인 경우에만 펼침 대상으로 잡음
-          const parentSet = new Set<string>();
-          categories.forEach((m) => {
-            if (m.parentId && catIds.has(m.parentId)) parentSet.add(m.parentId);
-          });
-
           const next: Record<string, boolean> = {};
-          parentSet.forEach((pid) => (next[pid] = true));
-
-          // 최상위 카테고리는 기본 펼침
-          categories.forEach((m) => {
-            if (m.parentId === null) next[m.id] = true;
-          });
+          rows
+            .filter((m) => !m.hasPage)
+            .forEach((m) => {
+              if (m.parentId === null) next[m.id] = true;
+            });
 
           return next;
         });
@@ -127,18 +112,17 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
     return () => unsub();
   }, [db]);
 
-  // ✅ 좌측 트리에 표시할 대상은 "카테고리(hasPage=false)"만
   const isCategory = (m: MenuDoc) => !m.hasPage;
 
-  // ✅ 기능 메뉴(페이지)의 "사용 가능" 판정 (비활성화는 기능 메뉴에만 적용)
+  /** ✅ 기능 메뉴(페이지)의 사용 가능 여부 (비활성화는 기능에만 적용) */
   const canUseLeafPage = (m: MenuDoc) => {
-    if (!m.hasPage) return true; // 카테고리는 비활성 판정 대상 아님(항상 true 취급)
+    if (!m.hasPage) return true; // 카테고리는 여기서 비활성 판정하지 않음
     if (!m.isActive) return false;
     if (m.adminOnly && !isAdmin) return false;
     return true;
   };
 
-  // ✅ parentId -> children 구성 (필터 없이 원본 트리 유지)
+  /** ✅ parentId -> children */
   const childrenByParent = useMemo(() => {
     const map = new Map<string | null, MenuDoc[]>();
     menus.forEach((m) => {
@@ -150,14 +134,19 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
     return map;
   }, [menus]);
 
-  // ✅ 카테고리 하위 카테고리 개수(좌측 트리용)
+  /** ✅ 이번 요구사항: "하위에 메뉴가 없는 카테고리" 판정 (children 0개) */
+  const isEmptyCategory = (categoryId: string) => {
+    const kids = childrenByParent.get(categoryId) ?? [];
+    return kids.length === 0;
+  };
+
+  /** ✅ 카테고리 하위 카테고리 수 (펼침 화살표 표시용) */
   const categoryChildrenCount = (categoryId: string) => {
     const kids = childrenByParent.get(categoryId) ?? [];
     return kids.filter(isCategory).length;
   };
 
-  // ✅ 오버된 카테고리의 "직계 자식 중 기능 메뉴(hasPage=true)"만 옆 패널에 표시
-  // - 여기서 활성/비활성 둘 다 보여주되, 비활성은 클릭/hover 없는 스타일로 렌더
+  /** ✅ 옆 패널: 오버된 카테고리의 직계 기능 메뉴(hasPage=true) */
   const hoverLeafPages = useMemo(() => {
     if (!hoverCategoryId) return [];
     const kids = childrenByParent.get(hoverCategoryId) ?? [];
@@ -209,32 +198,48 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
     return (
       <div className="space-y-1">
         {kids.map((cat) => {
-          const childCatsCount = categoryChildrenCount(cat.id);
-          const hasChildCategories = childCatsCount > 0;
-          const isOpen = expanded[cat.id] ?? false;
           const padLeft = 12 + depth * 12;
 
-          // ✅ 카테고리는 비활성화 대상이 아니므로 항상 hover/click 가능
+          const hasChildCategories = categoryChildrenCount(cat.id) > 0;
+          const isOpen = expanded[cat.id] ?? false;
+
+          // ✅ 이번 요구사항 핵심
+          // - 최상위 카테고리(parentId === null)는 무조건 활성
+          // - 최상위 제외(parentId !== null)인데 children 0개면 비활성(무반응)
+          const isTopLevel = cat.parentId === null;
+          const empty = isEmptyCategory(cat.id);
+          const categoryDisabled = !isTopLevel && empty;
+
+          const baseClass =
+            "w-full flex items-center justify-between px-3 py-2 rounded text-sm";
+          const activeClass = "hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer";
+          const disabledClass = "opacity-50 cursor-not-allowed pointer-events-none select-none";
+
           return (
             <div key={cat.id}>
               <button
                 type="button"
-                className="w-full flex items-center justify-between px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
+                className={`${baseClass} ${categoryDisabled ? disabledClass : activeClass}`}
                 style={{ paddingLeft: padLeft }}
-                title="카테고리"
-                onMouseEnter={(e) => openHoverPanel(cat.id, e.currentTarget as unknown as HTMLElement)}
-                onMouseLeave={scheduleCloseHoverPanel}
+                title={categoryDisabled ? "하위 메뉴가 없어 사용할 수 없습니다." : "카테고리"}
+                onMouseEnter={
+                  categoryDisabled
+                    ? undefined
+                    : (e) => openHoverPanel(cat.id, e.currentTarget as unknown as HTMLElement)
+                }
+                onMouseLeave={categoryDisabled ? undefined : scheduleCloseHoverPanel}
                 onClick={() => {
+                  if (categoryDisabled) return;
                   if (hasChildCategories) toggleExpand(cat.id);
                 }}
               >
                 <span className="truncate">{cat.name}</span>
                 <span className="text-xs opacity-70">
-                  {hasChildCategories ? (isOpen ? "▾" : "▸") : ""}
+                  {categoryDisabled ? "" : hasChildCategories ? (isOpen ? "▾" : "▸") : ""}
                 </span>
               </button>
 
-              {hasChildCategories && isOpen ? (
+              {!categoryDisabled && hasChildCategories && isOpen ? (
                 <div className="mt-1">{renderCategoryTree(cat.id, depth + 1)}</div>
               ) : null}
             </div>
@@ -246,10 +251,10 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
 
   return (
     <div ref={containerRef} className="relative">
-      {/* ✅ 좌측: 카테고리 트리만 */}
+      {/* ✅ 좌측: 카테고리 트리 */}
       {renderCategoryTree(null, 0)}
 
-      {/* ✅ 오른쪽(옆) 패널: 해당 카테고리의 "기능 메뉴"만 (활성/비활성 모두 표시) */}
+      {/* ✅ 우측(옆) 패널: 기능 메뉴만 (활성/비활성 모두 표시) */}
       {hoverCategoryId && hoverLeafPages.length > 0 ? (
         <div
           className="absolute left-full ml-2 w-56 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg"
@@ -274,7 +279,7 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
                 );
               }
 
-              // ✅ 활성 기능 메뉴: Link + hover 반응
+              // ✅ 활성 기능 메뉴
               return (
                 <Link
                   key={p.id}
