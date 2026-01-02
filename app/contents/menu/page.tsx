@@ -3,23 +3,20 @@
 /**
  * app/contents/menu/page.tsx
  *
- * ✅ 기존 변경사항(이전 수정)
- * - (버그 수정) "기능 메뉴가 목록에서 안 보이는" 케이스:
- *   초기 expanded가 최상위만 true라서, 중간 카테고리(또는 메뉴관리)가 접힌 상태면
- *   그 하위 기능(hasPage=true) 메뉴가 flatVisible에 포함되지 않아 리스트에서 사라져 보였습니다.
+ * ✅ 추가 요구사항 반영
+ * - 메뉴 접근 등급(access) 추가:
+ *   disabled / public / paid / admin
  *
- * ✅ 해결
- * - 최초 로드 1회에 한해: "자식이 있는 모든 부모 메뉴"를 expanded=true로 자동 펼침 처리
- * - TreeRow 토글 아이콘도 expanded 상태(▾/▸)에 맞게 표시되도록 isOpen 전달
+ * ✅ 호환 유지(중요)
+ * - 기존 필드 isActive/adminOnly 를 완전히 제거하지 않고,
+ *   access 값으로부터 자동 계산하여 함께 저장합니다.
+ *   (기존 Sidebar/권한 로직이 isActive/adminOnly를 쓰고 있을 가능성 대비)
  *
  * ✅ 기존 요구사항 유지
  * - 목록 Row의 "같은레벨 추가 / 하위메뉴" 버튼 없음
  * - 계층 지정은 "상위 메뉴(소속)" select로만 처리
- *
- * ✅ 이번 추가 변경사항(요청 반영)
- * - 기능(페이지) 메뉴 삭제 시:
- *   "관련 페이지 파일을 수동으로 삭제/정리했는지" 확인하는 confirm을 추가
- *   (Next.js 환경에서 런타임으로 파일 삭제/존재 확인은 불가하므로 수동 정리 안내로 사고 예방)
+ * - 최초 로드 시 자식이 있는 부모 메뉴 expanded 자동 펼침
+ * - 기능(페이지) 메뉴 삭제 시 수동 파일 정리 confirm 유지
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -57,6 +54,10 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
+/** ✅ 메뉴 접근 등급 */
+type MenuAccess = "disabled" | "public" | "paid" | "admin";
+
+/** ✅ Firestore 메뉴 문서 타입 */
 type MenuDoc = {
   id: string;
 
@@ -64,8 +65,15 @@ type MenuDoc = {
   name: string;
   group: string;
   order: number;
-  isActive: boolean;
-  adminOnly: boolean;
+
+  /** ✅ 신규: 접근 등급(단일 필드로 관리) */
+  access: MenuAccess;
+
+  /** ✅ 호환 필드(기존 구조와의 호환용) */
+  isActive: boolean; // access !== 'disabled'
+  adminOnly: boolean; // access === 'admin'
+  paidOnly: boolean; // access === 'paid' (신규, 호환/명시용)
+
   parentId: string | null;
 
   // ✅ 타입
@@ -86,6 +94,26 @@ const resequence = (ids: string[]) => {
   const map = new Map<string, number>();
   ids.forEach((id, idx) => map.set(id, (idx + 1) * 10));
   return map;
+};
+
+/** ✅ access -> (isActive/adminOnly/paidOnly) 동기화 */
+const accessToCompat = (access: MenuAccess) => {
+  const isActive = access !== "disabled";
+  const adminOnly = access === "admin";
+  const paidOnly = access === "paid";
+  return { isActive, adminOnly, paidOnly };
+};
+
+/** ✅ 기존 문서(isActive/adminOnly/paidOnly) -> access 추론 */
+const inferAccessFromLegacy = (v: any): MenuAccess => {
+  const isActive = v?.isActive ?? true;
+  const adminOnly = v?.adminOnly ?? false;
+  const paidOnly = v?.paidOnly ?? false;
+
+  if (!isActive) return "disabled";
+  if (adminOnly) return "admin";
+  if (paidOnly) return "paid";
+  return "public";
 };
 
 export default function MenuManagePage() {
@@ -113,16 +141,18 @@ export default function MenuManagePage() {
     hasPage: boolean;
     slug: string;
     group: string;
-    isActive: boolean;
-    adminOnly: boolean;
+
+    /** ✅ 신규 */
+    access: MenuAccess;
+
     parentId: string | null;
   }>({
     name: "",
     hasPage: false,
     slug: "",
     group: "Workspace",
-    isActive: true,
-    adminOnly: false,
+
+    access: "public",
     parentId: null,
   });
 
@@ -132,16 +162,18 @@ export default function MenuManagePage() {
     hasPage: boolean;
     slug: string;
     group: string;
-    isActive: boolean;
-    adminOnly: boolean;
+
+    /** ✅ 신규 */
+    access: MenuAccess;
+
     parentId: string | null;
   }>({
     name: "",
     hasPage: false,
     slug: "",
     group: "",
-    isActive: true,
-    adminOnly: false,
+
+    access: "public",
     parentId: null,
   });
 
@@ -193,12 +225,14 @@ export default function MenuManagePage() {
 
         const hasPage = Boolean(v.hasPage ?? false);
         const slug = String(v.slug ?? "");
-        const path =
-          hasPage && slug ? String(v.path ?? buildPath(slug)) : String(v.path ?? "");
+        const path = hasPage && slug ? String(v.path ?? buildPath(slug)) : String(v.path ?? "");
 
         const parentIdRaw = v.parentId ?? null;
-        const parentId =
-          parentIdRaw === "" ? null : (parentIdRaw as string | null);
+        const parentId = parentIdRaw === "" ? null : (parentIdRaw as string | null);
+
+        // ✅ 신규 access 읽기 (없으면 기존 필드로 추론)
+        const access: MenuAccess = (v.access as MenuAccess) ?? inferAccessFromLegacy(v);
+        const compat = accessToCompat(access);
 
         return {
           id: d.id,
@@ -208,8 +242,12 @@ export default function MenuManagePage() {
           path: hasPage ? path : "",
           group: String(v.group ?? ""),
           order: Number(v.order ?? 0),
-          isActive: Boolean(v.isActive ?? true),
-          adminOnly: Boolean(v.adminOnly ?? false),
+
+          access,
+          isActive: Boolean(v.isActive ?? compat.isActive),
+          adminOnly: Boolean(v.adminOnly ?? compat.adminOnly),
+          paidOnly: Boolean(v.paidOnly ?? compat.paidOnly),
+
           parentId,
         };
       });
@@ -217,26 +255,22 @@ export default function MenuManagePage() {
       setMenus(rows);
 
       /**
-       * ✅ [핵심 수정]
-       * - 최초 1회만: "자식이 있는 모든 부모 메뉴"를 expanded=true로 자동 펼침
-       * - 그래야 중간 카테고리가 접혀서 하위 기능 메뉴가 리스트에서 사라지는 문제가 없습니다.
+       * ✅ 최초 1회만: "자식이 있는 모든 부모 메뉴"를 expanded=true로 자동 펼침
+       * - 중간 카테고리가 접혀서 하위 기능 메뉴가 리스트에서 사라지는 문제 방지
        */
       setExpanded((prev) => {
         if (Object.keys(prev).length > 0) return prev;
 
-        // parentId 기준으로 "부모가 된 적 있는 id" 모으기
         const parentSet = new Set<string>();
         rows.forEach((m) => {
           if (m.parentId) parentSet.add(m.parentId);
         });
 
         const next: Record<string, boolean> = {};
-        // 자식이 있는 부모는 전부 펼침
         parentSet.forEach((pid) => {
           next[pid] = true;
         });
 
-        // 최상위도 혹시 없을 수 있으니 안전하게 true(이미 위 parentSet에서 커버되더라도 무해)
         rows.forEach((m) => {
           if (m.parentId === null) next[m.id] = true;
         });
@@ -277,7 +311,6 @@ export default function MenuManagePage() {
 
         out.push({ ...node, depth, hasChildren, isOpen });
 
-        // ✅ 펼쳐진 노드만 하위 렌더
         if (hasChildren && isOpen) walk(node.id, depth + 1);
       }
     };
@@ -299,8 +332,7 @@ export default function MenuManagePage() {
   const validate = (payload: { name: string; hasPage: boolean; slug: string }) => {
     if (!payload.name.trim()) return "메뉴명을 입력해주세요.";
     if (payload.hasPage) {
-      if (!payload.slug.trim())
-        return "기능(페이지 있음) 메뉴는 폴더명(영문)이 필수입니다.";
+      if (!payload.slug.trim()) return "기능(페이지 있음) 메뉴는 폴더명(영문)이 필수입니다.";
       if (!SLUG_REGEX.test(payload.slug)) {
         return "폴더명은 소문자 영문/숫자/_ 만 가능합니다. (공백/특수문자 불가)";
       }
@@ -330,6 +362,8 @@ export default function MenuManagePage() {
       const finalSlug = form.hasPage ? normalizedSlug : "";
       const finalPath = form.hasPage ? buildPath(finalSlug) : "";
 
+      const compat = accessToCompat(form.access);
+
       setBusy(true);
       await addDoc(collection(db, COL), {
         name: form.name.trim(),
@@ -337,8 +371,15 @@ export default function MenuManagePage() {
         slug: finalSlug,
         path: finalPath,
         group: form.group,
-        isActive: form.isActive,
-        adminOnly: form.adminOnly,
+
+        /** ✅ 신규 */
+        access: form.access,
+
+        /** ✅ 호환 필드 저장(기존 로직 대비) */
+        isActive: compat.isActive,
+        adminOnly: compat.adminOnly,
+        paidOnly: compat.paidOnly,
+
         parentId: form.parentId ?? null,
         order,
         updatedAt: serverTimestamp(),
@@ -363,8 +404,8 @@ export default function MenuManagePage() {
       hasPage: Boolean(m.hasPage),
       slug: m.slug || "",
       group: m.group,
-      isActive: m.isActive,
-      adminOnly: m.adminOnly,
+
+      access: m.access ?? inferAccessFromLegacy(m),
       parentId: m.parentId ?? null,
     });
   };
@@ -402,6 +443,8 @@ export default function MenuManagePage() {
         finalPath = buildPath(finalSlug);
       }
 
+      const compat = accessToCompat(edit.access);
+
       setBusy(true);
 
       const current = menus.find((m) => m.id === editId);
@@ -414,8 +457,15 @@ export default function MenuManagePage() {
         slug: finalSlug,
         path: finalPath,
         group: edit.group,
-        isActive: edit.isActive,
-        adminOnly: edit.adminOnly,
+
+        /** ✅ 신규 */
+        access: edit.access,
+
+        /** ✅ 호환 필드 저장(기존 로직 대비) */
+        isActive: compat.isActive,
+        adminOnly: compat.adminOnly,
+        paidOnly: compat.paidOnly,
+
         parentId: edit.parentId ?? null,
         order: nextOrder,
         updatedAt: serverTimestamp(),
@@ -441,7 +491,7 @@ export default function MenuManagePage() {
       const hasChildren = menus.some((m) => m.parentId === id);
       if (hasChildren) return setErr("하위 메뉴가 존재합니다. 하위 메뉴를 먼저 삭제해주세요.");
 
-      // ✅ [추가] 기능(페이지) 메뉴 삭제 시: 수동 파일 정리 확인
+      // ✅ 기능(페이지) 메뉴 삭제 시: 수동 파일 정리 확인
       const target = menus.find((m) => m.id === id);
       if (target?.hasPage && target.slug) {
         const ok = window.confirm(
@@ -554,6 +604,14 @@ export default function MenuManagePage() {
 
   const toggleExpand = (id: string) => setExpanded((p) => ({ ...p, [id]: !(p[id] ?? false) }));
 
+  /** ✅ access 표시 라벨 */
+  const accessLabel = (a: MenuAccess) => {
+    if (a === "disabled") return "비활성화";
+    if (a === "public") return "일반";
+    if (a === "paid") return "유료";
+    return "admin";
+  };
+
   return (
     <main className="px-6 pb-10">
       <div className="mx-auto max-w-6xl">
@@ -652,22 +710,19 @@ export default function MenuManagePage() {
               />
             </label>
 
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={form.isActive}
-                onChange={(e) => setForm((p) => ({ ...p, isActive: e.target.checked }))}
-              />
-              노출(isActive)
-            </label>
-
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={form.adminOnly}
-                onChange={(e) => setForm((p) => ({ ...p, adminOnly: e.target.checked }))}
-              />
-              관리자 전용(adminOnly)
+            {/* ✅ 신규: 접근 등급 */}
+            <label className="text-sm">
+              접근 등급
+              <select
+                value={form.access}
+                onChange={(e) => setForm((p) => ({ ...p, access: e.target.value as MenuAccess }))}
+                className="mt-1 w-full rounded-lg border px-3 py-2"
+              >
+                <option value="disabled">비활성화</option>
+                <option value="public">일반(전체)</option>
+                <option value="paid">유료(구독)</option>
+                <option value="admin">admin(관리자)</option>
+              </select>
             </label>
           </div>
         </section>
@@ -687,13 +742,12 @@ export default function MenuManagePage() {
 
           <div className="overflow-x-auto">
             <div className="min-w-[980px]">
-              <div className="grid grid-cols-[60px_1fr_160px_120px_120px_120px_180px] gap-2 border-b pb-2 text-sm font-semibold">
+              <div className="grid grid-cols-[60px_1fr_160px_120px_160px_180px] gap-2 border-b pb-2 text-sm font-semibold">
                 <div> </div>
                 <div>메뉴</div>
                 <div className="text-gray-600 dark:text-gray-300">type</div>
                 <div className="text-gray-600 dark:text-gray-300">group</div>
-                <div>active</div>
-                <div>adminOnly</div>
+                <div>access</div>
                 <div>actions</div>
               </div>
 
@@ -705,6 +759,7 @@ export default function MenuManagePage() {
                         key={m.id}
                         m={m}
                         canWrite={canWrite}
+                        accessLabel={accessLabel}
                         onToggle={() => toggleExpand(m.id)}
                         onEdit={() => startEdit(m)}
                         onDelete={() => removeMenu(m.id)}
@@ -798,22 +853,19 @@ export default function MenuManagePage() {
                   />
                 </label>
 
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={edit.isActive}
-                    onChange={(e) => setEdit((p) => ({ ...p, isActive: e.target.checked }))}
-                  />
-                  노출(isActive)
-                </label>
-
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={edit.adminOnly}
-                    onChange={(e) => setEdit((p) => ({ ...p, adminOnly: e.target.checked }))}
-                  />
-                  관리자 전용(adminOnly)
+                {/* ✅ 신규: 접근 등급 */}
+                <label className="text-sm">
+                  접근 등급
+                  <select
+                    value={edit.access}
+                    onChange={(e) => setEdit((p) => ({ ...p, access: e.target.value as MenuAccess }))}
+                    className="mt-1 w-full rounded-lg border px-3 py-2"
+                  >
+                    <option value="disabled">비활성화</option>
+                    <option value="public">일반(전체)</option>
+                    <option value="paid">유료(구독)</option>
+                    <option value="admin">admin(관리자)</option>
+                  </select>
                 </label>
               </div>
 
@@ -841,11 +893,12 @@ export default function MenuManagePage() {
 function TreeRow(props: {
   m: MenuDoc & { depth: number; hasChildren: boolean; isOpen: boolean };
   canWrite: boolean;
+  accessLabel: (a: MenuAccess) => string;
   onToggle: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
-  const { m, canWrite, onToggle, onEdit, onDelete } = props;
+  const { m, canWrite, accessLabel, onToggle, onEdit, onDelete } = props;
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: m.id,
@@ -866,7 +919,7 @@ function TreeRow(props: {
     <div
       ref={setNodeRef}
       style={style}
-      className="grid grid-cols-[60px_1fr_160px_120px_120px_120px_180px] items-center gap-2 rounded-lg border px-2 py-2 text-sm"
+      className="grid grid-cols-[60px_1fr_160px_120px_160px_180px] items-center gap-2 rounded-lg border px-2 py-2 text-sm"
     >
       <div className="flex items-center gap-2">
         <button
@@ -875,7 +928,6 @@ function TreeRow(props: {
           className="h-7 w-7 rounded border text-xs disabled:opacity-40"
           title={m.hasChildren ? "펼침/접힘" : "하위 없음"}
         >
-          {/* ✅ expanded 상태에 맞게 아이콘 표시 */}
           {m.hasChildren ? (m.isOpen ? "▾" : "▸") : "·"}
         </button>
 
@@ -899,8 +951,9 @@ function TreeRow(props: {
 
       <div className="text-gray-600 dark:text-gray-300">{typeLabel}</div>
       <div className="truncate text-gray-600 dark:text-gray-300">{m.group || "-"}</div>
-      <div>{m.isActive ? "Y" : "N"}</div>
-      <div>{m.adminOnly ? "Y" : "N"}</div>
+
+      {/* ✅ access 표시 */}
+      <div>{accessLabel(m.access)}</div>
 
       <div className="flex justify-end gap-2">
         <button onClick={onEdit} className="rounded-lg border px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-900">
