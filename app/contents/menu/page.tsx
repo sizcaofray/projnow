@@ -3,13 +3,15 @@
 /**
  * app/contents/menu/page.tsx
  *
- * ✅ 수정사항
- * - select/input의 텍스트 색상이 브라우저 기본값을 타서 다크모드에서 안 보이는 문제 해결
- * - 모든 input/select에 bg/text/border dark variant 명시
+ * ✅ 반영 사항
+ * 1) 상위 메뉴(소속) Select 옵션을 트리 구조대로 들여쓰기 표시
+ * 2) select/input 글자색이 브라우저 기본값을 타는 문제 해결(다크/라이트 모두 가독)
  *
- * ✅ 기능사항 유지
+ * ✅ 유지 사항
  * - 메뉴 접근 등급(access) 유지
  * - 기존 필드(isActive/adminOnly/paidOnly) 호환 유지
+ * - 목록 Row의 "같은레벨 추가 / 하위메뉴" 버튼 없음
+ * - 계층 지정은 "상위 메뉴(소속)" select로만 처리
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -65,7 +67,7 @@ type MenuDoc = {
   /** ✅ 호환 필드(기존 구조와의 호환용) */
   isActive: boolean; // access !== 'disabled'
   adminOnly: boolean; // access === 'admin'
-  paidOnly: boolean; // access === 'paid' (신규, 호환/명시용)
+  paidOnly: boolean; // access === 'paid'
 
   parentId: string | null;
 
@@ -155,9 +157,7 @@ export default function MenuManagePage() {
     slug: string;
     group: string;
 
-    /** ✅ 신규 */
     access: MenuAccess;
-
     parentId: string | null;
   }>({
     name: "",
@@ -176,9 +176,7 @@ export default function MenuManagePage() {
     slug: string;
     group: string;
 
-    /** ✅ 신규 */
     access: MenuAccess;
-
     parentId: string | null;
   }>({
     name: "",
@@ -384,10 +382,8 @@ export default function MenuManagePage() {
         path: finalPath,
         group: form.group,
 
-        /** ✅ 신규 */
         access: form.access,
 
-        /** ✅ 호환 필드 저장(기존 로직 대비) */
         isActive: compat.isActive,
         adminOnly: compat.adminOnly,
         paidOnly: compat.paidOnly,
@@ -470,10 +466,8 @@ export default function MenuManagePage() {
         path: finalPath,
         group: edit.group,
 
-        /** ✅ 신규 */
         access: edit.access,
 
-        /** ✅ 호환 필드 저장(기존 로직 대비) */
         isActive: compat.isActive,
         adminOnly: compat.adminOnly,
         paidOnly: compat.paidOnly,
@@ -605,14 +599,33 @@ export default function MenuManagePage() {
   const previewEditSlug = editOriginalHasPage ? editOriginalSlug : normalizeSlug(edit.slug || "slug_here");
   const previewEditPath = edit.hasPage ? buildPath(previewEditSlug) : "(카테고리: 경로 없음)";
 
+  /**
+   * ✅ 상위 메뉴(소속) 옵션을 트리 구조로 생성(들여쓰기 포함)
+   * - HTML <option>은 공백이 무시될 수 있어 NBSP(\u00A0) 사용
+   * - 카테고리는 [카테고리], 기능은 [기능] 표시로 구분
+   */
   const parentOptions = useMemo(() => {
     const opts: Array<{ id: string | null; label: string }> = [{ id: null, label: "(최상위)" }];
-    menus
-      .slice()
-      .sort((a, b) => a.order - b.order)
-      .forEach((m) => opts.push({ id: m.id, label: m.name }));
+
+    const labelFor = (m: MenuDoc, depth: number) => {
+      const nb = "\u00A0"; // non-breaking space
+      const indent = nb.repeat(depth * 4);
+      const branch = depth > 0 ? "└ " : "";
+      const kind = m.hasPage ? "[기능]" : "[카테고리]";
+      return `${indent}${branch}${m.name} ${kind}`;
+    };
+
+    const walk = (parentId: string | null, depth: number) => {
+      const kids = childrenByParent.get(parentId) ?? [];
+      for (const m of kids) {
+        opts.push({ id: m.id, label: labelFor(m, depth) });
+        walk(m.id, depth + 1);
+      }
+    };
+
+    walk(null, 0);
     return opts;
-  }, [menus]);
+  }, [childrenByParent]);
 
   const toggleExpand = (id: string) => setExpanded((p) => ({ ...p, [id]: !(p[id] ?? false) }));
 
@@ -718,7 +731,7 @@ export default function MenuManagePage() {
               />
             </label>
 
-            {/* ✅ 신규: 접근 등급 */}
+            {/* ✅ 접근 등급 */}
             <label className="text-sm">
               접근 등급
               <select
@@ -839,7 +852,7 @@ export default function MenuManagePage() {
                     className={INPUT_CLASS}
                   >
                     {parentOptions
-                      .filter((o) => o.id !== editId)
+                      .filter((o) => o.id !== editId) // ✅ 자기 자신은 상위로 선택 불가
                       .map((o) => (
                         <option key={String(o.id ?? "null")} value={o.id ?? ""}>
                           {o.label}
@@ -857,7 +870,7 @@ export default function MenuManagePage() {
                   />
                 </label>
 
-                {/* ✅ 신규: 접근 등급 */}
+                {/* ✅ 접근 등급 */}
                 <label className="text-sm">
                   접근 등급
                   <select
@@ -956,7 +969,6 @@ function TreeRow(props: {
       <div className="text-gray-600 dark:text-gray-300">{typeLabel}</div>
       <div className="truncate text-gray-600 dark:text-gray-300">{m.group || "-"}</div>
 
-      {/* ✅ access 표시 */}
       <div>{accessLabel(m.access)}</div>
 
       <div className="flex justify-end gap-2">
