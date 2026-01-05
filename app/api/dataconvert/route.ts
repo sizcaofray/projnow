@@ -2,6 +2,7 @@
 // - 업로드된 파일을 입력 포맷에 맞게 파싱한 뒤, 사용자가 선택한 출력 포맷으로 변환해 다운로드 응답을 반환합니다.
 // - SAS(.sas7bdat)는 파일 경로 기반 parse가 필요하여 /tmp에 임시 저장 후 처리합니다.
 // - ✅ sas7bdat/fs-ext는 네이티브(.node) 포함 가능성이 있어, 반드시 "SAS 변환 분기 내부"에서만 런타임 로드합니다.
+// - ✅ NextResponse body 타입(BodyInit) 문제로 Buffer를 직접 넘기지 않고 Uint8Array로 변환해 반환합니다.
 
 import { NextResponse } from "next/server";
 import * as XLSX from "xlsx"; // SheetJS
@@ -179,8 +180,11 @@ export async function POST(req: Request) {
       outName = `${baseName}.txt`;
     }
 
-    // 6) 다운로드 응답
-    return new NextResponse(outBuf, {
+    // ✅ 6) 다운로드 응답
+    // NextResponse의 body 타입(BodyInit)과 TS가 충돌할 수 있어 Buffer를 Uint8Array로 변환해 넘깁니다.
+    const body = new Uint8Array(outBuf);
+
+    return new NextResponse(body, {
       status: 200,
       headers: {
         "Content-Type": outMime,
