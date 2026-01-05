@@ -19,13 +19,15 @@
     "firebase-admin": "^13.6.0",
     "mammoth": "^1.11.0",
     "next": "16.1.0",
+    "papaparse": "^5.5.3",
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "^5.4.449",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "sas7bdat": "^0.1.7",
     "sax": "^1.4.3",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "xml2js": "^0.6.2"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
