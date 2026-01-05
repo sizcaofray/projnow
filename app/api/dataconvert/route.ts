@@ -1,6 +1,7 @@
 // app/api/dataconvert/convert/route.ts
 // - 업로드된 파일을 입력 포맷에 맞게 파싱한 뒤, 사용자가 선택한 출력 포맷으로 변환해 다운로드 응답을 반환합니다.
 // - SAS(.sas7bdat)는 sas7bdat 라이브러리가 파일 경로 기반 parse를 제공하므로 /tmp에 임시 저장 후 처리합니다.
+// - ✅ sas7bdat(fs-ext 네이티브 의존성)는 번들러 분석 시점 문제를 줄이기 위해 "SAS 변환 분기 내부"에서만 require 합니다.
 
 import { NextResponse } from "next/server";
 import * as XLSX from "xlsx"; // SheetJS
@@ -9,10 +10,6 @@ import { parseStringPromise, Builder as XmlBuilder } from "xml2js"; // XML parse
 import fs from "fs/promises";
 import path from "path";
 import os from "os";
-
-// sas7bdat는 CommonJS 형태가 많아 require로 로드하는 편이 안전합니다.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const SAS7BDAT = require("sas7bdat");
 
 // 서버 런타임은 Node가 필요합니다. (SAS 임시파일 저장/읽기)
 export const runtime = "nodejs";
@@ -100,7 +97,10 @@ export async function POST(req: Request) {
     const outputType = String(formData.get("outputType") || "xlsx"); // xlsx | csv | json | xml | txt
 
     if (!(file instanceof File)) {
-      return NextResponse.json({ ok: false, message: "파일이 없습니다." }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, message: "파일이 없습니다." },
+        { status: 400 }
+      );
     }
 
     const originalName = file.name || "upload";
@@ -131,6 +131,11 @@ export async function POST(req: Request) {
     let rows: Record<string, any>[] = [];
 
     if (resolvedInput === "sas") {
+      // ✅ sas7bdat는 네이티브 의존성(fs-ext)을 포함할 수 있어,
+      //    번들러 분석 단계에서 문제가 날 수 있으므로 "필요할 때만" 런타임 require 합니다.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const SAS7BDAT = require("sas7bdat");
+
       // sas7bdat는 파일 경로 기반 parse를 사용하므로 /tmp에 저장 후 읽습니다.
       // (Vercel/서버리스에서도 일반적으로 /tmp는 writable)
       const tmpPath = path.join(os.tmpdir(), `${baseName}-${Date.now()}.sas7bdat`);
