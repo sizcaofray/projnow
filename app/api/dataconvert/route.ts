@@ -4,7 +4,7 @@
 //   - 여러 파일 + outputType=xlsx + excelMultiMode=singleWorkbook => 한 엑셀 파일(파일별 시트)로 생성
 //   - 그 외는 단일 파일 변환(클라이언트가 각 파일을 개별 호출하여 다운로드)
 // - SAS(.sas7bdat)는 파일 경로 기반 parse가 필요하여 /tmp에 임시 저장 후 처리합니다.
-// - ✅ sas7bdat/fs-ext는 네이티브(.node) 포함 가능성이 있어, 반드시 "SAS 변환 분기 내부"에서만 런타임 로드합니다.
+// - ✅ ESM 환경에서 require 사용을 위해 createRequire(import.meta.url) 사용 (require is not defined 해결)
 // - ✅ NextResponse body 타입(BodyInit) 문제로 Buffer 대신 Uint8Array로 반환합니다.
 
 import { NextResponse } from "next/server";
@@ -14,9 +14,13 @@ import { parseStringPromise, Builder as XmlBuilder } from "xml2js"; // XML parse
 import fs from "fs/promises";
 import path from "path";
 import os from "os";
+import { createRequire } from "module"; // ✅ ESM에서 require 만들기
 
-// 서버 런타임은 Node가 필요합니다. (SAS 임시파일 저장/읽기)
+// ✅ Node 런타임 강제 (Edge면 fs/tmp/native 모듈 불가)
 export const runtime = "nodejs";
+
+// ✅ ESM에서 require 대체
+const nodeRequire = createRequire(import.meta.url);
 
 // ---- 유틸: 파일명 안전화 ----
 function safeBaseName(name: string) {
@@ -35,7 +39,6 @@ function makeUniqueSheetName(rawName: string, used: Set<string>) {
   let name = base;
   let i = 2;
 
-  // 중복이면 (2), (3) 방식으로 뒤에 붙이되 31자 제한 유지
   while (used.has(name)) {
     const suffix = `(${i})`;
     const cut = Math.max(0, 31 - suffix.length);
@@ -58,7 +61,9 @@ function rowsToXlsxBuffer(rows: Record<string, any>[]) {
 }
 
 // ---- 유틸: 여러 시트 workbook(Buffer) 생성 ----
-function multiSheetsToXlsxBuffer(sheets: { name: string; rows: Record<string, any>[] }[]) {
+function multiSheetsToXlsxBuffer(
+  sheets: { name: string; rows: Record<string, any>[] }[]
+) {
   const wb = XLSX.utils.book_new();
 
   for (const s of sheets) {
@@ -80,8 +85,7 @@ function xlsxBufferToRows(buf: Buffer) {
   const wb = XLSX.read(buf, { type: "buffer" });
   const firstSheetName = wb.SheetNames[0];
   const ws = wb.Sheets[firstSheetName];
-  const rows = XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: "" });
-  return rows;
+  return XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: "" });
 }
 
 // ---- 유틸: TXT -> rows(JSON[]) ----
@@ -116,7 +120,7 @@ function rowsToXml(rows: Record<string, any>[]) {
   return builder.buildObject({ row: rows });
 }
 
-// ---- 유틸: 단일 File -> rows(JSON[]) (입력 타입/auto 포함) ----
+// ---- 유틸: 단일 File -> rows(JSON[]) ----
 async function parseFileToRows(file: File, inputType: string) {
   const originalName = file.name || "upload";
   const baseName = safeBaseName(originalName.replace(/\.[^/.]+$/, ""));
@@ -143,8 +147,8 @@ async function parseFileToRows(file: File, inputType: string) {
   let rows: Record<string, any>[] = [];
 
   if (resolvedInput === "sas") {
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    const SAS7BDAT = (0, eval)("require")("sas7bdat");
+    // ✅ require is not defined 해결: createRequire로 로드
+    const SAS7BDAT = nodeRequire("sas7bdat");
 
     const tmpPath = path.join(os.tmpdir(), `${baseName}-${Date.now()}.sas7bdat`);
     await fs.writeFile(tmpPath, buf);
@@ -188,9 +192,10 @@ export async function POST(req: Request) {
     const outputType = String(formData.get("outputType") || "xlsx");
 
     // ✅ 다중 Excel 모드 (기본: singleWorkbook)
-    const excelMultiMode = String(formData.get("excelMultiMode") || "singleWorkbook");
+    const excelMultiMode = String(
+      formData.get("excelMultiMode") || "singleWorkbook"
+    );
 
-    // files[] 우선, 없으면 file 사용
     const files: File[] =
       multi && multi.length > 0
         ? multi.filter((v): v is File => v instanceof File)
@@ -204,10 +209,11 @@ export async function POST(req: Request) {
 
     // ✅ 여러 파일 + 한 엑셀(시트 분리) 모드
     const isMultiToSingleWorkbook =
-      files.length > 1 && outputType === "xlsx" && excelMultiMode === "singleWorkbook";
+      files.length > 1 &&
+      outputType === "xlsx" &&
+      excelMultiMode === "singleWorkbook";
 
     if (isMultiToSingleWorkbook) {
-      // 여러 파일을 각각 rows로 파싱 후 시트로 생성. 시트명은 파일명 기반.
       const used = new Set<string>();
       const sheets: { name: string; rows: Record<string, any>[] }[] = [];
 
@@ -231,8 +237,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // ✅ 그 외(단일 변환) - 첫 파일만 처리
-    // (여러 파일 각각 파일 생성은 프론트가 파일별로 API를 순차 호출하여 다운로드)
+    // ✅ 그 외(단일 변환): 첫 파일만 처리
     const file = files[0];
     const originalName = file.name || "upload";
     const baseName = safeBaseName(originalName.replace(/\.[^/.]+$/, ""));
@@ -246,7 +251,8 @@ export async function POST(req: Request) {
 
     if (outputType === "xlsx") {
       outBuf = rowsToXlsxBuffer(rows);
-      outMime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      outMime =
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
     } else if (outputType === "csv") {
       outBuf = Buffer.from(rowsToCsv(rows), "utf8");
       outMime = "text/csv; charset=utf-8";
