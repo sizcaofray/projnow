@@ -1,7 +1,7 @@
-// app/api/dataconvert/convert/route.ts
+// app/api/dataconvert/route.ts
 // - 업로드된 파일을 입력 포맷에 맞게 파싱한 뒤, 사용자가 선택한 출력 포맷으로 변환해 다운로드 응답을 반환합니다.
-// - SAS(.sas7bdat)는 sas7bdat 라이브러리가 파일 경로 기반 parse를 제공하므로 /tmp에 임시 저장 후 처리합니다.
-// - ✅ sas7bdat(fs-ext 네이티브 의존성)는 번들러 분석 시점 문제를 줄이기 위해 "SAS 변환 분기 내부"에서만 require 합니다.
+// - SAS(.sas7bdat)는 파일 경로 기반 parse가 필요하여 /tmp에 임시 저장 후 처리합니다.
+// - ✅ sas7bdat/fs-ext는 네이티브(.node) 포함 가능성이 있어, 반드시 "SAS 변환 분기 내부"에서만 런타임 로드합니다.
 
 import { NextResponse } from "next/server";
 import * as XLSX from "xlsx"; // SheetJS
@@ -43,12 +43,13 @@ function xlsxBufferToRows(buf: Buffer) {
   const wb = XLSX.read(buf, { type: "buffer" });
   const firstSheetName = wb.SheetNames[0];
   const ws = wb.Sheets[firstSheetName];
-  // defval: 빈 셀은 null/""로 처리
+
+  // defval: 빈 셀은 ""로 처리
   const rows = XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: "" });
   return rows;
 }
 
-// ---- 유틸: TXT -> rows(JSON[]) (단순 delimited: 기본은 탭/쉼표 자동) ----
+// ---- 유틸: TXT -> rows(JSON[]) (단순 delimited: 탭/쉼표 자동) ----
 function txtToRows(text: string) {
   // 간단한 휴리스틱: 탭이 더 많으면 TSV, 아니면 CSV로 간주
   const tabCount = (text.match(/\t/g) || []).length;
@@ -58,24 +59,20 @@ function txtToRows(text: string) {
   const parsed = Papa.parse<Record<string, any>>(text, {
     header: true,
     delimiter,
-    skipEmptyLines: true,
+    skipEmptyLines: true
   });
 
-  // header가 없는 경우를 대비해 fallback 처리
   if (!parsed.data || parsed.data.length === 0) return [];
   return parsed.data as Record<string, any>[];
 }
 
-// ---- 유틸: XML -> rows(JSON[]) (기본 구조: <root><row>...</row></root> 를 기대) ----
+// ---- 유틸: XML -> rows(JSON[]) (기본 구조: <root><row>...</row></root> 기대) ----
 function xmlToRows(xml: string) {
-  // 사용자가 어떤 XML을 올릴지 알 수 없으므로,
-  // MVP에서는 “row 배열이 있는 구조”만 우선 지원합니다.
+  // XML 구조가 다양한 점을 고려해 MVP는 row 배열 구조만 우선 지원
   return parseStringPromise(xml, { explicitArray: false }).then((obj) => {
-    // 흔한 케이스: obj.root.row 또는 obj.rows.row 등
     const root = obj?.root ?? obj;
     const maybeRows = root?.row ?? root?.rows ?? root?.data ?? [];
     const arr = Array.isArray(maybeRows) ? maybeRows : [maybeRows];
-    // row 내부가 {col:[...]}처럼 오는 케이스는 explicitArray=false로 완화
     return arr.filter(Boolean) as Record<string, any>[];
   });
 }
@@ -83,7 +80,6 @@ function xmlToRows(xml: string) {
 // ---- 유틸: rows(JSON[]) -> XML ----
 function rowsToXml(rows: Record<string, any>[]) {
   const builder = new XmlBuilder({ headless: true, rootName: "root" });
-  // <root><row>...</row></root>
   return builder.buildObject({ row: rows });
 }
 
@@ -97,10 +93,7 @@ export async function POST(req: Request) {
     const outputType = String(formData.get("outputType") || "xlsx"); // xlsx | csv | json | xml | txt
 
     if (!(file instanceof File)) {
-      return NextResponse.json(
-        { ok: false, message: "파일이 없습니다." },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, message: "파일이 없습니다." }, { status: 400 });
     }
 
     const originalName = file.name || "upload";
@@ -131,20 +124,16 @@ export async function POST(req: Request) {
     let rows: Record<string, any>[] = [];
 
     if (resolvedInput === "sas") {
-      // ✅ sas7bdat는 네이티브 의존성(fs-ext)을 포함할 수 있어,
-      //    번들러 분석 단계에서 문제가 날 수 있으므로 "필요할 때만" 런타임 require 합니다.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const SAS7BDAT = require("sas7bdat");
+      // ✅ 네이티브 모듈 번들링/파싱 문제 회피:
+      // - 런타임에만 require되도록 eval('require') 사용
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      const SAS7BDAT = (0, eval)("require")("sas7bdat");
 
-      // sas7bdat는 파일 경로 기반 parse를 사용하므로 /tmp에 저장 후 읽습니다.
-      // (Vercel/서버리스에서도 일반적으로 /tmp는 writable)
       const tmpPath = path.join(os.tmpdir(), `${baseName}-${Date.now()}.sas7bdat`);
       await fs.writeFile(tmpPath, buf);
 
-      // rowFormat: object면 {Col:Value} 형태로 바로 받기 좋습니다.
       rows = await SAS7BDAT.parse(tmpPath, { rowFormat: "object" });
 
-      // 임시파일 정리
       await fs.unlink(tmpPath).catch(() => {});
     } else if (resolvedInput === "xlsx") {
       rows = xlsxBufferToRows(buf);
@@ -152,7 +141,7 @@ export async function POST(req: Request) {
       const text = buf.toString("utf8");
       const parsed = Papa.parse<Record<string, any>>(text, {
         header: true,
-        skipEmptyLines: true,
+        skipEmptyLines: true
       });
       rows = (parsed.data || []) as Record<string, any>[];
     } else if (resolvedInput === "json") {
@@ -163,7 +152,6 @@ export async function POST(req: Request) {
       const text = buf.toString("utf8");
       rows = await xmlToRows(text);
     } else {
-      // txt
       const text = buf.toString("utf8");
       rows = txtToRows(text);
     }
@@ -175,8 +163,7 @@ export async function POST(req: Request) {
 
     if (outputType === "xlsx") {
       outBuf = rowsToXlsxBuffer(rows);
-      outMime =
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      outMime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
     } else if (outputType === "csv") {
       outBuf = Buffer.from(rowsToCsv(rows), "utf8");
       outMime = "text/csv; charset=utf-8";
@@ -187,7 +174,6 @@ export async function POST(req: Request) {
       outBuf = Buffer.from(rowsToXml(rows), "utf8");
       outMime = "application/xml; charset=utf-8";
     } else {
-      // txt
       outBuf = Buffer.from(rowsToCsv(rows), "utf8");
       outMime = "text/plain; charset=utf-8";
       outName = `${baseName}.txt`;
@@ -198,8 +184,8 @@ export async function POST(req: Request) {
       status: 200,
       headers: {
         "Content-Type": outMime,
-        "Content-Disposition": `attachment; filename="${encodeURIComponent(outName)}"`,
-      },
+        "Content-Disposition": `attachment; filename="${encodeURIComponent(outName)}"`
+      }
     });
   } catch (e: any) {
     return NextResponse.json(
