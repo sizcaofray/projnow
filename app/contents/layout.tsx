@@ -1,9 +1,7 @@
 // app/contents/layout.tsx
-// contents 이하 페이지들의 공통 프레임 레이아웃 (Server Component)
-// ✅ 수정사항
-// 1) 상단 "구독 버튼만 있는 sticky header" 제거
-// 2) RootLayout(AppHeader)에 구독/로그인 UI가 있으므로 중복 제거
-// 3) min-h-screen 제거 + flex/min-h-0 정리로 불필요한 스크롤 방지
+// - contents 이하 페이지 공통 레이아웃
+// - ✅ footer가 브라우저 하단에 붙도록: 루트 컨테이너를 flex-1 + flex-col + min-h-0로 구성
+// - ✅ 메인 영역만 스크롤(overflow-auto), footer는 항상 하단 고정
 
 import type { ReactNode } from "react";
 import Link from "next/link";
@@ -12,10 +10,9 @@ import ContentsMenuLinks from "@/components/ContentsMenuLinks";
 
 export default function ContentsLayout({ children }: { children: ReactNode }) {
   return (
-    // ✅ RootLayout의 children 영역이 flex-1이므로, 여기서는 h-full/min-h-0로 맞춤
-    <div className="h-full min-h-0 flex flex-col">
-      {/* ✅ (2) Header(구독 라인) 제거 */}
-
+    // ✅ RootLayout의 children 래퍼가 flex 컨테이너이므로,
+    //    여기서 flex-1을 주면 "남은 화면 높이"를 꽉 채움 -> footer 하단 고정
+    <div className="flex-1 min-h-0 flex flex-col">
       {/* Body */}
       <div className="flex flex-1 min-h-0">
         {/* Sidebar */}
@@ -31,13 +28,13 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
           </nav>
         </aside>
 
-        {/* Main */}
+        {/* Main (스크롤은 여기만 발생) */}
         <main className="flex-1 min-w-0 min-h-0 overflow-auto">
           <div className="p-6">{children}</div>
         </main>
       </div>
 
-      {/* Footer */}
+      {/* Footer (항상 하단) */}
       <footer className="border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
         <div className="h-12 px-4 flex items-center justify-between text-sm text-gray-600 dark:text-gray-300">
           <div className="flex items-center gap-4">
