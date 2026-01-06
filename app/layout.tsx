@@ -1,7 +1,7 @@
 // app/layout.tsx
-// - App Router 루트 레이아웃
-// - 모든 페이지에 공통 헤더(AppHeader) 표시
-// - 다크모드: OS 설정 자동 추종(강제 지정 없음)
+// - 루트 레이아웃
+// - ✅ 헤더 + children을 flex-col로 구성하여 불필요한 body 스크롤 방지
+// - ✅ children이 남은 높이를 채우도록 flex-1/min-h-0 적용
 
 import "./globals.css";
 import type { Metadata } from "next";
@@ -16,10 +16,12 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="ko" suppressHydrationWarning>
-      <body className="min-h-screen transition-colors">
-        {/* ✅ 전역 헤더: 모든 페이지에서 로그인 버튼 사용 가능 */}
+      {/* ✅ body를 flex-col로: 헤더 높이를 제외한 나머지를 children이 차지 */}
+      <body className="min-h-screen flex flex-col transition-colors">
         <AppHeader />
-        {children}
+
+        {/* ✅ 남은 공간을 children이 채우도록 */}
+        <div className="flex-1 min-h-0">{children}</div>
       </body>
     </html>
   );

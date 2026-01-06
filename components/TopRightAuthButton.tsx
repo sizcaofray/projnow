@@ -2,10 +2,10 @@
 
 // components/TopRightAuthButton.tsx
 // - 모든 페이지 공통: 우측 상단 로그인/로그아웃 버튼
-// - 비로그인 상태에서도 언제든 로그인 가능 (요구사항 핵심)
-// - 강제 리다이렉트 없음
-// - "업로드된 page.tsx의 로그인 구현 방식"을 참고(버튼/로직/disabled 처리)
+// - ✅ 구독 버튼을 로그인 정보(메일) 앞에 배치
+// - ✅ 다크/라이트에서 자연스럽게 보이도록 색상 클래스 명시
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import { GoogleAuthProvider, signInWithPopup, signOut } from "firebase/auth";
 
@@ -34,7 +34,6 @@ export default function TopRightAuthButton() {
         setActionError("Firebase Auth 초기화에 실패했습니다. 환경변수를 확인해주세요.");
         return;
       }
-
       setAuthBusy(true);
       const provider = new GoogleAuthProvider();
       await signInWithPopup(auth, provider);
@@ -50,7 +49,6 @@ export default function TopRightAuthButton() {
     try {
       setActionError("");
       if (!auth) return;
-
       setAuthBusy(true);
       await signOut(auth);
     } catch (e: any) {
@@ -60,12 +58,20 @@ export default function TopRightAuthButton() {
     }
   };
 
-  // 초기화 에러(환경변수 누락 등) 또는 액션 에러 메시지
   const errorMsg = initError || actionError;
 
   return (
-    <div className="flex items-center gap-3">
-      {/* ✅ 상태 텍스트는 작게 (원하시면 제거 가능) */}
+    <div className="flex items-center gap-3 justify-end">
+      {/* ✅ (2) 구독 버튼: “로그인 정보(메일)” 바로 앞 */}
+      <Link
+        href="/contents/subscribe"
+        className="px-3 py-1.5 rounded border border-gray-200 text-sm hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-800"
+        title="구독"
+      >
+        구독
+      </Link>
+
+      {/* ✅ 로그인 사용자 메일 */}
       <div className="hidden text-sm text-gray-600 dark:text-gray-300 sm:block">
         {loading ? "..." : user ? user.email ?? "Signed in" : "Guest"}
       </div>
@@ -89,7 +95,7 @@ export default function TopRightAuthButton() {
         </button>
       )}
 
-      {/* ✅ 에러는 헤더를 망치지 않게 아주 작게 표시 */}
+      {/* ✅ 에러는 헤더를 망치지 않게 작게 표시 */}
       {errorMsg ? (
         <span className="hidden max-w-[260px] truncate text-xs text-red-600 dark:text-red-300 md:inline">
           {errorMsg}

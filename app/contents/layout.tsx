@@ -1,9 +1,9 @@
 // app/contents/layout.tsx
 // contents 이하 페이지들의 공통 프레임 레이아웃 (Server Component)
-// 변경사항:
-// - 샘플 메뉴 제거
-// - Firestore menus를 실시간으로 읽어 Sidebar에 반영하는 Client Component(ContentsMenuLinks) 추가
-// - Menu Setting / User Management 메뉴는 admin에게만 노출되도록 AdminOnlyLinks 유지
+// ✅ 수정사항
+// 1) 상단 "구독 버튼만 있는 sticky header" 제거
+// 2) RootLayout(AppHeader)에 구독/로그인 UI가 있으므로 중복 제거
+// 3) min-h-screen 제거 + flex/min-h-0 정리로 불필요한 스크롤 방지
 
 import type { ReactNode } from "react";
 import Link from "next/link";
@@ -12,23 +12,9 @@ import ContentsMenuLinks from "@/components/ContentsMenuLinks";
 
 export default function ContentsLayout({ children }: { children: ReactNode }) {
   return (
-    <div className="min-h-screen flex flex-col">
-      {/* Header */}
-      <header className="sticky top-0 z-50 border-b border-gray-200 dark:border-gray-800 bg-white/80 dark:bg-gray-900/80 backdrop-blur">
-        <div className="h-14 px-4 flex items-center justify-between">
-
-          {/* 우측: 구독 버튼만 */}
-          <div className="flex items-center justify-end">
-            <Link
-              href="/contents/subscribe"
-              className="px-3 py-1.5 rounded border border-gray-200 dark:border-gray-800 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
-              title="구독"
-            >
-              구독
-            </Link>
-          </div>
-        </div>
-      </header>
+    // ✅ RootLayout의 children 영역이 flex-1이므로, 여기서는 h-full/min-h-0로 맞춤
+    <div className="h-full min-h-0 flex flex-col">
+      {/* ✅ (2) Header(구독 라인) 제거 */}
 
       {/* Body */}
       <div className="flex flex-1 min-h-0">
