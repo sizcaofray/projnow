@@ -1,12 +1,13 @@
 // app/layout.tsx
-// - 루트 레이아웃
-// - ✅ 헤더 + (남은 높이) + 하위 레이아웃이 정확히 계산되도록 구성
-// - ✅ children 래퍼를 flex 컨테이너로 만들어, contents 레이아웃이 "뷰포트 남은 높이"를 확실히 채우도록 함
-//   -> footer를 항상 브라우저 하단에 붙이기 위한 핵심
+// - App Router 루트 레이아웃
+// - 모든 페이지에 공통 헤더(AppHeader) 표시
+// - ✅ 모든 페이지(커버 포함) 하단 Footer 표시 (이용약관/개인정보처리방침만 중앙 배치)
+// - 다크모드: OS 설정 자동 추종(강제 지정 없음)
 
 import "./globals.css";
 import type { Metadata } from "next";
 import { ReactNode } from "react";
+import Link from "next/link";
 import AppHeader from "@/components/AppHeader";
 
 export const metadata: Metadata = {
@@ -17,12 +18,25 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="ko" suppressHydrationWarning>
+      {/* ✅ footer를 하단에 고정하려면 body를 flex-col 구조로 구성 */}
       <body className="min-h-screen flex flex-col transition-colors">
-        {/* ✅ 상단 고정 영역 */}
+        {/* ✅ 전역 헤더 */}
         <AppHeader />
 
-        {/* ✅ 남은 높이를 채우는 영역(중요): 하위 layout이 flex-1로 동작 가능 */}
-        <div className="flex-1 min-h-0 flex flex-col">{children}</div>
+        {/* ✅ 페이지 본문 영역 (남은 공간을 채움) */}
+        <div className="flex-1 min-h-0">{children}</div>
+
+        {/* ✅ 전역 Footer: 가운데 정렬(요구사항) */}
+        <footer className="border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
+          <div className="h-12 px-4 flex items-center justify-center gap-6 text-sm text-gray-600 dark:text-gray-300">
+            <Link href="/contents/terms" className="hover:underline">
+              이용약관
+            </Link>
+            <Link href="/contents/privacy" className="hover:underline">
+              개인정보처리방침
+            </Link>
+          </div>
+        </footer>
       </body>
     </html>
   );
