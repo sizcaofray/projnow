@@ -1,11 +1,8 @@
 // app/contents/layout.tsx
-// contents 이하 페이지들의 공통 프레임 레이아웃 (Server Component)
-//
-// ✅ 수정 목적
-// 1) 전역 헤더(AppHeader)와 contents 헤더 중복 방지: contents 내부 Header 제거 유지
-// 2) Footer: 우측 ©/년도/프로그램명 제거
-// 3) Footer: 이용약관/개인정보처리방침을 "가운데 정렬" 배치
-// 4) Footer는 브라우저 하단에 붙고, 스크롤은 main 영역에서만 발생하도록 유지
+// ✅ 목적
+// - 메뉴(사이드바/오버패널)가 메인 표에 가려지는 문제 해결: sidebar z-index 상향
+// - footer: 이용약관/개인정보처리방침만 중앙 배치 (불필요한 내용 제거)
+// - 스크롤은 main 영역에서만 생기도록 유지
 
 import type { ReactNode } from "react";
 import Link from "next/link";
@@ -16,30 +13,26 @@ import ContentsMenuLinks from "@/components/ContentsMenuLinks";
 export default function ContentsLayout({ children }: { children: ReactNode }) {
   return (
     <div className="flex-1 min-h-0 flex flex-col">
-      {/* ✅ Header 제거: 전역 헤더(AppHeader)만 사용 */}
-
       {/* Body */}
       <div className="flex flex-1 min-h-0">
-        {/* Sidebar */}
-        <aside className="w-64 border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
+        {/* Sidebar (✅ 메인보다 항상 위) */}
+        <aside className="w-64 border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 relative z-[600]">
           <nav className="p-4 space-y-1">
-            {/* ✅ Firestore menus 실시간 반영 메뉴 */}
             <ContentsMenuLinks />
 
-            {/* ✅ 관리 메뉴(관리자만 노출) */}
             <div className="pt-3 mt-3 border-t border-gray-200 dark:border-gray-800 space-y-1">
               <AdminOnlyLinks />
             </div>
           </nav>
         </aside>
 
-        {/* Main (스크롤은 여기만) */}
-        <main className="flex-1 min-w-0 min-h-0 overflow-auto">
+        {/* Main (✅ z 낮게) */}
+        <main className="flex-1 min-w-0 min-h-0 overflow-auto relative z-0">
           <div className="p-6">{children}</div>
         </main>
       </div>
 
-      {/* Footer (항상 하단) */}
+      {/* Footer (요구사항 그대로: 중앙) */}
       <footer className="border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
         <div className="h-12 px-4 flex items-center justify-center gap-6 text-sm text-gray-600 dark:text-gray-300">
           <Link href="/contents/terms" className="hover:underline">

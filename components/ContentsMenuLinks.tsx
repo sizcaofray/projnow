@@ -3,12 +3,14 @@
 /**
  * components/ContentsMenuLinks.tsx
  *
- * ✅ 반영 사항(이번 요청)
+ * ✅ 변경사항(이번 요청)
+ * - 메뉴 오버 패널이 메인 영역(표)에 가려지는 문제 해결
+ *   -> 컨테이너/패널에 높은 z-index 부여
+ *
+ * ✅ 기존 유지
  * - 최상위 카테고리(parentId === null)는 비활성화 대상 아님(항상 활성)
  * - 최상위 제외 하위 카테고리(parentId !== null) 중,
  *   하위에 메뉴가 "아예 없는" 카테고리(children 0개)는 비활성 표시 + 무반응
- *
- * ✅ 기존 유지
  * - 비활성화는 기능 메뉴(hasPage=true)에는 그대로 적용(isActive/adminOnly)
  * - 좌측: 카테고리 트리, 우측(옆) 패널: 오버된 카테고리의 직계 기능 메뉴 표시
  */
@@ -116,7 +118,7 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
 
   /** ✅ 기능 메뉴(페이지)의 사용 가능 여부 (비활성화는 기능에만 적용) */
   const canUseLeafPage = (m: MenuDoc) => {
-    if (!m.hasPage) return true; // 카테고리는 여기서 비활성 판정하지 않음
+    if (!m.hasPage) return true;
     if (!m.isActive) return false;
     if (m.adminOnly && !isAdmin) return false;
     return true;
@@ -134,13 +136,13 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
     return map;
   }, [menus]);
 
-  /** ✅ 이번 요구사항: "하위에 메뉴가 없는 카테고리" 판정 (children 0개) */
+  /** ✅ "하위에 메뉴가 없는 카테고리" 판정 (children 0개) */
   const isEmptyCategory = (categoryId: string) => {
     const kids = childrenByParent.get(categoryId) ?? [];
     return kids.length === 0;
   };
 
-  /** ✅ 카테고리 하위 카테고리 수 (펼침 화살표 표시용) */
+  /** ✅ 카테고리 하위 카테고리 수 */
   const categoryChildrenCount = (categoryId: string) => {
     const kids = childrenByParent.get(categoryId) ?? [];
     return kids.filter(isCategory).length;
@@ -162,7 +164,6 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
   };
 
   const openHoverPanel = (categoryId: string, el: HTMLElement | null) => {
-    // ✅ 닫힘 예약 취소
     if (closeTimerRef.current) {
       window.clearTimeout(closeTimerRef.current);
       closeTimerRef.current = null;
@@ -203,15 +204,11 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
           const hasChildCategories = categoryChildrenCount(cat.id) > 0;
           const isOpen = expanded[cat.id] ?? false;
 
-          // ✅ 이번 요구사항 핵심
-          // - 최상위 카테고리(parentId === null)는 무조건 활성
-          // - 최상위 제외(parentId !== null)인데 children 0개면 비활성(무반응)
           const isTopLevel = cat.parentId === null;
           const empty = isEmptyCategory(cat.id);
           const categoryDisabled = !isTopLevel && empty;
 
-          const baseClass =
-            "w-full flex items-center justify-between px-3 py-2 rounded text-sm";
+          const baseClass = "w-full flex items-center justify-between px-3 py-2 rounded text-sm";
           const activeClass = "hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer";
           const disabledClass = "opacity-50 cursor-not-allowed pointer-events-none select-none";
 
@@ -250,14 +247,16 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
   };
 
   return (
-    <div ref={containerRef} className="relative">
+    // ✅ z-index 추가: 메인(표)보다 위에 떠야 함
+    <div ref={containerRef} className="relative z-[600]">
       {/* ✅ 좌측: 카테고리 트리 */}
       {renderCategoryTree(null, 0)}
 
-      {/* ✅ 우측(옆) 패널: 기능 메뉴만 (활성/비활성 모두 표시) */}
+      {/* ✅ 우측(옆) 패널: 기능 메뉴 */}
       {hoverCategoryId && hoverLeafPages.length > 0 ? (
         <div
-          className="absolute left-full ml-2 w-56 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg"
+          // ✅ z-index 추가: 패널이 표에 가려지지 않도록
+          className="absolute left-full ml-2 w-56 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg z-[700]"
           style={{ top: panelTop }}
           onMouseEnter={cancelCloseHoverPanel}
           onMouseLeave={scheduleCloseHoverPanel}
@@ -266,7 +265,6 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
             {hoverLeafPages.map((p) => {
               const usable = canUseLeafPage(p);
 
-              // ✅ 비활성 기능 메뉴: hover/클릭 반응 없음
               if (!usable) {
                 return (
                   <div
@@ -279,7 +277,6 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
                 );
               }
 
-              // ✅ 활성 기능 메뉴
               return (
                 <Link
                   key={p.id}
