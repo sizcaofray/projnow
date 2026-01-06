@@ -1,39 +1,22 @@
 // app/contents/layout.tsx
 // contents 이하 페이지들의 공통 프레임 레이아웃 (Server Component)
 //
-// ✅ 변경 요약
-// 1) 헤더 왼쪽 끝: 서비스명 Projnow
-// 2) 헤더 오른쪽 끝: TopRightAuthButton(구독 버튼 + 로그인 이메일 + 로그인/로그아웃)
-// 3) 기존 "구독 버튼만 있는 라인" 제거 (중복 제거)
-// 4) 불필요한 위아래 스크롤 방지: flex/min-h-0/overflow 설정 유지
-// 5) footer는 브라우저 하단에 붙도록 flex-col 구조 유지
+// ✅ 수정 목적
+// 1) 전역 헤더(AppHeader)와 contents 헤더가 중복 렌더링되어 상단 바가 2개 생기는 문제 해결
+// 2) contents 내부에서는 별도 헤더를 두지 않고, 전역 헤더만 사용
+// 3) footer는 화면 하단에 붙고, 스크롤은 main 영역에서만 발생하도록 유지
 
 import type { ReactNode } from "react";
 import Link from "next/link";
 
 import AdminOnlyLinks from "@/components/AdminOnlyLinks";
 import ContentsMenuLinks from "@/components/ContentsMenuLinks";
-import TopRightAuthButton from "@/components/TopRightAuthButton";
 
 export default function ContentsLayout({ children }: { children: ReactNode }) {
   return (
-    <div className="min-h-screen flex flex-col">
-      {/* Header */}
-      <header className="sticky top-0 z-50 border-b border-gray-200 dark:border-gray-800 bg-white/80 dark:bg-gray-900/80 backdrop-blur">
-        <div className="h-14 px-4 flex items-center justify-between">
-          {/* ✅ 좌측: 서비스명(좌측 끝) */}
-          <Link
-            href="/contents"
-            className="font-semibold text-gray-900 dark:text-gray-100"
-            title="Projnow"
-          >
-            Projnow
-          </Link>
-
-          {/* ✅ 우측: 구독(로그인 조건) + 이메일 + 로그인/로그아웃 (우측 끝) */}
-          <TopRightAuthButton />
-        </div>
-      </header>
+    // ✅ 전역 레이아웃(RootLayout)의 남은 높이를 그대로 사용하기 위해 min-h-screen 대신 flex-1/min-h-0 사용
+    <div className="flex-1 min-h-0 flex flex-col">
+      {/* ✅ Header 제거: 전역 헤더(AppHeader)만 사용 */}
 
       {/* Body */}
       <div className="flex flex-1 min-h-0">
@@ -50,7 +33,7 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
           </nav>
         </aside>
 
-        {/* Main */}
+        {/* Main (스크롤은 여기만) */}
         <main className="flex-1 min-w-0 min-h-0 overflow-auto">
           <div className="p-6">{children}</div>
         </main>
