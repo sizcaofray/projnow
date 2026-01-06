@@ -8,12 +8,10 @@
  * - remainingDays는 DB에 쓰지 않고, 화면 계산 후 end일자를 저장
  * - 선택 사용자에 대해 남은일수 기준 "일괄 만료일 적용" 기능 포함
  *
- * ✅ 추가: 구독 버튼 활성화 여부(subscribeButtonEnabled) 관리
- * - 유저관리 UI에서 체크박스로 관리
- * - 저장 시 users/{uid}.subscribeButtonEnabled 필드를 별도 업데이트 시도
- *   (Firestore rules가 4필드만 허용이면 이 업데이트는 실패할 수 있으므로, 실패해도 기존 저장 로직은 유지)
- *
- * ✅ 출처: 사용자가 업로드한 기존 page.tsx의 사용자관리 구현 로직/구조를 그대로 사용 :contentReference[oaicite:1]{index=1}
+ * ✅ 추가: 구독 버튼 활성화(subscribeButtonEnabled) 관리
+ * - 테이블에 "구독버튼" 컬럼 추가(체크박스)
+ * - 저장 시 기존 4필드 저장은 그대로 유지
+ * - subscribeButtonEnabled는 별도로 updateDoc 시도(룰에 막히면 경고만)
  */
 
 import { useEffect, useState } from 'react';
@@ -161,7 +159,7 @@ export default function UserManagementPage() {
           remainingDays: calcRemainingDaysFromEnd(endTs),
           subscriptionTier: norm(data.subscriptionTier ?? data.role ?? 'free') as Tier,
 
-          // ✅ 구독 버튼 활성화(기본 true)
+          // ✅ 추가: 구독 버튼 활성(기본 true)
           subscribeButtonEnabled:
             typeof data.subscribeButtonEnabled === 'boolean' ? data.subscribeButtonEnabled : true,
         });
@@ -226,9 +224,7 @@ export default function UserManagementPage() {
     } catch (e: any) {
       console.error('일괄 만료일 적용 오류:', e);
       alert(
-        `일괄 만료일 적용 중 오류가 발생했습니다: ${
-          e?.code || e?.message || '알 수 없는 오류'
-        }`
+        `일괄 만료일 적용 중 오류가 발생했습니다: ${e?.code || e?.message || '알 수 없는 오류'}`
       );
     } finally {
       setBulkSaving(false);
@@ -281,7 +277,7 @@ export default function UserManagementPage() {
     });
   }
 
-  /** 저장(규칙 허용 4필드 + ✅ 구독 버튼 활성화 별도 시도) */
+  /** 저장(규칙 허용 4필드만) + ✅ 구독 버튼 활성화 별도 저장 시도 */
   const handleSave = async (row: UserRow) => {
     setSaving(row.uid);
     try {
@@ -298,7 +294,7 @@ export default function UserManagementPage() {
         endTs = Timestamp.fromDate(clamped);
       }
 
-      // ✅ 기존 저장(규칙 허용 4필드)
+      // ✅ 기존 저장(룰 허용 4필드)
       await updateDoc(doc(db, 'users', row.uid), {
         role: safeRole,
         isSubscribed,
@@ -314,8 +310,7 @@ export default function UserManagementPage() {
         remainingDays: calcRemainingDaysFromEnd(endTs),
       });
 
-      // ✅ 추가: 구독 버튼 활성화 저장(별도 업데이트)
-      // - rules가 4필드만 허용이면 여기서 실패할 수 있으므로, 실패해도 전체 저장은 성공 처리합니다.
+      // ✅ 추가 저장: subscribeButtonEnabled (룰에 막힐 수 있으므로 별도 try/catch)
       try {
         const enabled =
           typeof row.subscribeButtonEnabled === 'boolean' ? row.subscribeButtonEnabled : true;
@@ -326,9 +321,9 @@ export default function UserManagementPage() {
 
         patchRow(row.uid, { subscribeButtonEnabled: enabled });
       } catch (e: any) {
-        console.error('구독 버튼 활성화 저장 오류:', e);
+        console.error('subscribeButtonEnabled 저장 오류:', e);
         alert(
-          `⚠️ 기본 저장은 완료됐지만, "구독 버튼 활성화" 저장은 실패했습니다.\n` +
+          `⚠️ 기본 저장은 완료됐지만, "구독버튼 활성화" 저장은 실패했습니다.\n` +
             `Firestore rules에서 users 문서의 subscribeButtonEnabled 필드 쓰기가 허용되어야 합니다.\n` +
             `오류: ${e?.code || e?.message || '알 수 없는 오류'}`
         );
@@ -422,8 +417,8 @@ export default function UserManagementPage() {
               <th className="py-2 pr-4">Role</th>
               <th className="py-2 pr-4">Subscribed</th>
 
-              {/* ✅ 추가 컬럼: 구독 버튼 활성 */}
-              <th className="py-2 pr-4">Subscribe Btn</th>
+              {/* ✅ 추가 컬럼 */}
+              <th className="py-2 pr-4">구독버튼</th>
 
               <th className="py-2 pr-4">Start</th>
               <th className="py-2 pr-4">End</th>
@@ -431,7 +426,6 @@ export default function UserManagementPage() {
               <th className="py-2 pr-4">Action</th>
             </tr>
           </thead>
-
           <tbody>
             {rows.map((r) => (
               <tr key={r.uid} className="border-b align-top">
@@ -491,14 +485,14 @@ export default function UserManagementPage() {
                   />
                 </td>
 
-                {/* ✅ 구독 버튼 활성 체크 */}
+                {/* ✅ 구독 버튼 활성화 체크 */}
                 <td className="py-2 pr-4">
                   <input
                     type="checkbox"
                     className="w-4 h-4"
                     checked={typeof r.subscribeButtonEnabled === 'boolean' ? r.subscribeButtonEnabled : true}
                     onChange={(e) => patchRow(r.uid, { subscribeButtonEnabled: e.target.checked })}
-                    title="헤더의 구독 버튼 표시/숨김 여부"
+                    title="헤더의 구독 버튼 활성/비활성"
                   />
                 </td>
 

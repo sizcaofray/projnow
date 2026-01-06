@@ -2,9 +2,9 @@
 
 // components/TopRightAuthButton.tsx
 // - 모든 페이지 공통: 우측 상단 로그인/로그아웃 버튼
-// - ✅ 추가: 로그인 유저의 users/{uid}.subscribeButtonEnabled 값을 읽어
-//   "구독" 버튼을 표시/숨김 처리합니다.
-// - 비로그인 상태에서도 로그인 가능, 강제 리다이렉트 없음
+// - ✅ 로그인 되어야만 "구독" 버튼이 활성(클릭 가능)되도록 처리
+// - ✅ users/{uid}.subscribeButtonEnabled 값을 읽어 "구독 버튼 활성/비활성" 반영
+// - ✅ rules/권한 문제로 읽기 실패 시: 로그인 상태라도 안전하게 비활성 처리(원하시면 기본 활성으로 바꿀 수 있음)
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
@@ -20,8 +20,8 @@ export default function TopRightAuthButton() {
   const [authBusy, setAuthBusy] = useState(false);
   const [actionError, setActionError] = useState("");
 
-  // ✅ 구독 버튼 표시 여부(기본 true)
-  const [subscribeBtnEnabled, setSubscribeBtnEnabled] = useState<boolean>(true);
+  // ✅ 구독 버튼 활성 여부 (로그인 전에는 무조건 비활성)
+  const [subscribeBtnEnabled, setSubscribeBtnEnabled] = useState(false);
 
   // ✅ Auth 싱글톤 참조
   const auth = useMemo(() => {
@@ -34,26 +34,31 @@ export default function TopRightAuthButton() {
 
   // ✅ 로그인 유저의 subscribeButtonEnabled를 실시간 반영
   useEffect(() => {
-    // 비로그인은 유저 문서가 없으므로 구독 버튼을 숨기는 편이 안전합니다.
-    // (원하시면 여기서 true로 바꿔 “게스트도 구독 보기”로 변경 가능합니다.)
+    // 비로그인: 구독 버튼 비활성
     if (!user) {
       setSubscribeBtnEnabled(false);
       return;
     }
+
+    // 로그인: 기본값은 true(필드가 없으면 활성)
+    setSubscribeBtnEnabled(true);
 
     const ref = doc(db, "users", user.uid);
     const unsub = onSnapshot(
       ref,
       (snap) => {
         const data = (snap.exists() ? snap.data() : null) as any;
+
+        // 필드가 없으면 기본 true
         const enabled =
           typeof data?.subscribeButtonEnabled === "boolean"
             ? data.subscribeButtonEnabled
-            : true; // 필드가 없으면 기본 true
+            : true;
+
         setSubscribeBtnEnabled(enabled);
       },
       () => {
-        // 읽기 실패 시에는 “기본 노출”보다는 안전하게 숨김 처리
+        // 읽기 실패 시 비활성(원하시면 true로 바꿔도 됩니다)
         setSubscribeBtnEnabled(false);
       }
     );
@@ -100,7 +105,7 @@ export default function TopRightAuthButton() {
 
   return (
     <div className="flex items-center gap-3">
-      {/* ✅ 구독 버튼 (유저별 활성화 true일 때만 표시) */}
+      {/* ✅ 구독 버튼: 로그인 + 활성 true 일 때만 클릭 가능 */}
       {user && subscribeBtnEnabled ? (
         <Link
           href="/contents/subscribe"
@@ -109,7 +114,17 @@ export default function TopRightAuthButton() {
         >
           구독
         </Link>
-      ) : null}
+      ) : (
+        // ✅ 비로그인 또는 비활성화: 버튼은 보이되 비활성 (요구: 로그인 되어야만 활성)
+        <button
+          type="button"
+          disabled
+          className="rounded-xl border border-gray-200 px-4 py-2 text-sm opacity-50 cursor-not-allowed dark:border-gray-800"
+          title={!user ? "로그인 후 이용 가능합니다." : "관리자 설정으로 비활성화됨"}
+        >
+          구독
+        </button>
+      )}
 
       {/* ✅ 상태 텍스트 */}
       <div className="hidden text-sm text-gray-600 dark:text-gray-300 sm:block">
