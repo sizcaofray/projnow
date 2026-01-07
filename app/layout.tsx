@@ -1,7 +1,7 @@
 // app/layout.tsx
 // - 전역 레이아웃
-// ✅ (중요) 세로 pseudo-line 제거
-// ✅ Footer는 body 맨 아래로 분리 (content wrapper 안에 넣지 않음)
+// ✅ (핵심) content wrapper의 세로 pseudo-line( after:... ) 제거
+// ✅ Footer는 content wrapper 밖(body 마지막)으로 분리
 
 import "./globals.css";
 import type { Metadata } from "next";
@@ -18,10 +18,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="ko" suppressHydrationWarning>
       <body className="h-dvh flex flex-col overflow-hidden transition-colors">
-        {/* Header */}
         <AppHeader />
 
-        {/* ✅ 콘텐츠 영역만 flex-1 */}
+        {/* ✅ 콘텐츠는 여기까지만 (Footer 포함 금지) */}
         <div className="flex-1 min-h-0 overflow-hidden">
           {children}
         </div>
