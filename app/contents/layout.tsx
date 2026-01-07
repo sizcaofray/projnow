@@ -10,10 +10,15 @@ import ContentsMenuLinks from "@/components/ContentsMenuLinks";
 
 export default function ContentsLayout({ children }: { children: ReactNode }) {
   return (
-    <div className="flex-1 min-h-0 flex">
+    // ✅ RootLayout의 children 래퍼는 flex 컨테이너가 아니므로
+    //    이 레이아웃은 스스로 header~footer 사이 높이를 "꽉" 채워야 합니다.
+    //    (flex-1은 부모가 flex일 때만 동작)
+    // ✅ 스크롤은 main에서만 발생하도록 루트는 overflow-hidden
+    <div className="h-full min-h-0 flex overflow-hidden">
       {/* Sidebar */}
-      <aside className="w-64 border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 relative z-[600]">
-        <nav className="p-4 space-y-1">
+      <aside className="w-64 h-full border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 relative z-[600]">
+        {/* ✅ 메뉴가 길어질 수 있으니 Sidebar 자체도 필요 시 스크롤 가능 */}
+        <nav className="h-full p-4 space-y-1 overflow-auto">
           <ContentsMenuLinks />
 
           <div className="pt-3 mt-3 border-t border-gray-200 dark:border-gray-800 space-y-1">
