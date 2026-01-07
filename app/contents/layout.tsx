@@ -1,9 +1,9 @@
 // app/contents/layout.tsx
-// - contents 이하 레이아웃
-// ✅ 중복선 원인 제거:
-//   - main의 border-l 제거
-//   - 대신 sidebar에 border-r 추가 (본문 구간의 경계선은 sidebar가 담당)
-// ✅ footer 구간은 sidebar가 관여하지 않으므로 겹침 발생 불가
+// ✅ 요구사항:
+// 1) 좌측 메뉴 배경이 footer까지 끊김 없이 이어져 보이게
+//    - 레이아웃 루트를 h-full로 고정
+//    - aside를 h-full로 강제
+//    - 메뉴가 길면 aside 내부만 스크롤 가능하게
 
 import type { ReactNode } from "react";
 import AdminOnlyLinks from "@/components/AdminOnlyLinks";
@@ -11,10 +11,12 @@ import ContentsMenuLinks from "@/components/ContentsMenuLinks";
 
 export default function ContentsLayout({ children }: { children: ReactNode }) {
   return (
-    <div className="flex-1 min-h-0 flex">
+    // ✅ 핵심: 부모(content 영역)가 준 높이를 "끝까지" 채움
+    <div className="w-full h-full min-h-0 flex">
       {/* Sidebar */}
-      <aside className="w-64 bg-gradient-to-b from-slate-900 to-slate-800 relative z-[600] border-r border-gray-800">
-        <nav className="p-4 space-y-1">
+      <aside className="w-64 h-full shrink-0 bg-gradient-to-b from-slate-900 to-slate-800">
+        {/* ✅ 사이드바 내부만 스크롤 */}
+        <nav className="h-full p-4 space-y-1 overflow-auto">
           <ContentsMenuLinks />
 
           <div className="pt-3 mt-3 border-t border-gray-800 space-y-1">
@@ -23,9 +25,8 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
         </nav>
       </aside>
 
-      {/* Main (스크롤은 여기만) */}
-      {/* ❗border-l 제거 */}
-      <main className="flex-1 min-w-0 min-h-0 overflow-auto relative z-0">
+      {/* Main */}
+      <main className="flex-1 min-w-0 h-full min-h-0 overflow-auto">
         <div className="p-6">{children}</div>
       </main>
     </div>
