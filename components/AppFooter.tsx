@@ -40,7 +40,7 @@ export default function AppFooter() {
     <footer className="border-t border-gray-200 dark:border-gray-800">
       <div className="flex">
         {/* ✅ 좌측: Sidebar 폭(260px/ w-64)과 동일한 영역을 Footer에서도 유지 */}
-        <div className="w-64 border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900" />
+        <div className="w-64 border-r border-gray-800 bg-gradient-to-b from-slate-900 to-slate-800" />
 
         {/* ✅ 우측: Footer 링크만 가운데 정렬 */}
         <div className="flex-1 bg-white dark:bg-gray-900">
