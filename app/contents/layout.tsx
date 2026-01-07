@@ -1,7 +1,8 @@
 // app/contents/layout.tsx
-// ✅ 실제 원인 수정: nav의 overflow-x-hidden 때문에 left-full 팝업이 잘려서 안 보임
-// ✅ hover/팝업 로직(ContentsMenuLinks.tsx)은 변경하지 않음
-// ✅ 가로 스크롤은 루트에서 overflow-x-hidden으로 그대로 방지
+// - contents 이하 레이아웃
+// ✅ 세로 경계선은 RootLayout에서 1번만 그리도록 통일
+// ✅ sidebar(border-r) 제거해서 중복선 제거
+// ✅ flyout은 RootLayout에서 overflow-x-visible로 보장 (여기서 방식 변경 없음)
 
 import type { ReactNode } from "react";
 import AdminOnlyLinks from "@/components/AdminOnlyLinks";
@@ -9,13 +10,10 @@ import ContentsMenuLinks from "@/components/ContentsMenuLinks";
 
 export default function ContentsLayout({ children }: { children: ReactNode }) {
   return (
-    // 가로 스크롤 방지(루트에서만)
-    <div className="w-full h-full min-h-0 flex overflow-x-hidden">
+    <div className="flex-1 min-h-0 flex">
       {/* Sidebar */}
-      <aside className="w-64 h-full shrink-0 bg-gradient-to-b from-slate-900 to-slate-800 relative overflow-visible">
-        {/* ✅ 세로만 스크롤
-            ❌ overflow-x-hidden 제거: left-full 팝업이 nav 밖으로 나가야 보임 */}
-        <nav className="h-full p-4 space-y-1 overflow-y-auto">
+      <aside className="w-64 bg-gradient-to-b from-slate-900 to-slate-800 relative z-[600]">
+        <nav className="p-4 space-y-1">
           <ContentsMenuLinks />
 
           <div className="pt-3 mt-3 border-t border-gray-800 space-y-1">
@@ -24,8 +22,8 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
         </nav>
       </aside>
 
-      {/* Main */}
-      <main className="flex-1 min-w-0 h-full min-h-0 overflow-auto">
+      {/* Main (스크롤은 여기만) */}
+      <main className="flex-1 min-w-0 min-h-0 overflow-auto relative z-0">
         <div className="p-6">{children}</div>
       </main>
     </div>
