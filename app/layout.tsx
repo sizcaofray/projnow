@@ -1,7 +1,7 @@
 // app/layout.tsx
 // - 전역 레이아웃
-// ✅ 경계선(세로 1px)을 RootLayout에서 한 번만 그려서 중복 제거
-// ✅ footer까지 선이 끊김 없이 유지됨
+// ✅ (중요) 세로 pseudo-line 제거
+// ✅ Footer는 body 맨 아래로 분리 (content wrapper 안에 넣지 않음)
 
 import "./globals.css";
 import type { Metadata } from "next";
@@ -18,13 +18,16 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="ko" suppressHydrationWarning>
       <body className="h-dvh flex flex-col overflow-hidden transition-colors">
+        {/* Header */}
         <AppHeader />
 
-        {/* ✅ 본문 + Footer를 한 컨테이너로 묶고, 여기서 세로 경계선 1px을 '딱 한 번'만 그림 */}
-        <div className="flex-1 min-h-0 overflow-hidden relative after:content-[''] after:absolute after:top-0 after:bottom-0 after:left-64 after:w-px after:bg-gray-800 after:pointer-events-none">
+        {/* ✅ 콘텐츠 영역만 flex-1 */}
+        <div className="flex-1 min-h-0 overflow-hidden">
           {children}
-          <AppFooter />
         </div>
+
+        {/* ✅ Footer는 body 마지막 */}
+        <AppFooter />
       </body>
     </html>
   );
