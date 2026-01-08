@@ -3,9 +3,9 @@
 /**
  * components/ContentsMenuLinks.tsx
  *
- * ✅ 변경사항(이번 요청)
- * - 메뉴 오버 패널이 메인 영역(표)에 가려지는 문제 해결
- *   -> 컨테이너/패널에 높은 z-index 부여
+ * ✅ 목표(이번 수정)
+ * - 좌측 메뉴/오버 패널이 다크모드/일반모드에 “영향받지 않도록”
+ *   → dark: 클래스 제거, 배경/글자/호버 색상을 메뉴 자체 기준으로 고정(사이드바는 항상 어두운 톤)
  *
  * ✅ 기존 유지
  * - 최상위 카테고리(parentId === null)는 비활성화 대상 아님(항상 활성)
@@ -13,6 +13,7 @@
  *   하위에 메뉴가 "아예 없는" 카테고리(children 0개)는 비활성 표시 + 무반응
  * - 비활성화는 기능 메뉴(hasPage=true)에는 그대로 적용(isActive/adminOnly)
  * - 좌측: 카테고리 트리, 우측(옆) 패널: 오버된 카테고리의 직계 기능 메뉴 표시
+ * - 메뉴 오버 패널이 메인 영역(표)에 가려지는 문제 방지(z-index 유지)
  */
 
 import Link from "next/link";
@@ -208,8 +209,10 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
           const empty = isEmptyCategory(cat.id);
           const categoryDisabled = !isTopLevel && empty;
 
-          const baseClass = "w-full flex items-center justify-between px-3 py-2 rounded text-sm";
-          const activeClass = "hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer";
+          // ✅ 다크/라이트 모드 비의존(사이드바 자체 기준 색상 고정)
+          const baseClass =
+            "w-full flex items-center justify-between px-3 py-2 rounded text-sm text-slate-100";
+          const activeClass = "hover:bg-white/10 cursor-pointer";
           const disabledClass = "opacity-50 cursor-not-allowed pointer-events-none select-none";
 
           return (
@@ -247,7 +250,7 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
   };
 
   return (
-    // ✅ z-index 추가: 메인(표)보다 위에 떠야 함
+    // ✅ z-index 유지: 메인(표)보다 위에 떠야 함
     <div ref={containerRef} className="relative z-[600]">
       {/* ✅ 좌측: 카테고리 트리 */}
       {renderCategoryTree(null, 0)}
@@ -255,8 +258,8 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
       {/* ✅ 우측(옆) 패널: 기능 메뉴 */}
       {hoverCategoryId && hoverLeafPages.length > 0 ? (
         <div
-          // ✅ z-index 추가: 패널이 표에 가려지지 않도록
-          className="absolute left-full ml-2 w-56 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg z-[700]"
+          // ✅ 다크/라이트 비의존: 패널도 사이드바 톤에 맞춰 고정(어두운 배경 + 밝은 글씨)
+          className="absolute left-full ml-2 w-56 rounded-lg border border-slate-700 bg-slate-900 text-slate-100 shadow-lg z-[700]"
           style={{ top: panelTop }}
           onMouseEnter={cancelCloseHoverPanel}
           onMouseLeave={scheduleCloseHoverPanel}
@@ -281,7 +284,7 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
                 <Link
                   key={p.id}
                   href={p.path}
-                  className="block rounded px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800"
+                  className="block rounded px-3 py-2 text-sm hover:bg-white/10"
                   title={p.path}
                 >
                   {p.name}
