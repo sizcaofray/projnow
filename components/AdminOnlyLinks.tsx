@@ -1,7 +1,8 @@
 // app/contents/_components/AdminOnlyLinks.tsx
 // ✅ admin 사용자에게만 Menu Setting / User Management / SDTM DB Manage 링크를 노출하는 전용 컴포넌트
-// - Server Component(layout)에서는 Firebase Auth 상태를 직접 못 읽기 때문에 Client Component로 분리
-// - users/{uid}.role === "admin" 인 경우에만 링크 노출
+// ✅ 수정사항
+// - dark:hover:* 제거 → 브라우저/OS 모드에 의해 색이 바뀌지 않게 고정
+// - 사이드바(어두운 배경) 기준으로 hover를 "항상 동일한 오버레이"로 적용
 
 "use client";
 
@@ -20,18 +21,18 @@ export default function AdminOnlyLinks() {
   useEffect(() => {
     const auth = getAuth();
 
-    // 로그인 상태 변경 감지
+    // ✅ 로그인 상태 변경 감지
     const unsub = onAuthStateChanged(auth, async (user) => {
       setLoading(true);
 
       try {
         if (!user) {
-          // 비로그인: 관리자 메뉴 숨김
+          // ✅ 비로그인: 관리자 메뉴 숨김
           setIsAdmin(false);
           return;
         }
 
-        // users/{uid}.role 확인
+        // ✅ users/{uid}.role 확인
         const snap = await getDoc(doc(db, "users", user.uid));
         const role = String((snap.exists() ? (snap.data() as any)?.role : "") ?? "")
           .trim()
@@ -39,7 +40,7 @@ export default function AdminOnlyLinks() {
 
         setIsAdmin(role === "admin");
       } catch {
-        // 에러 시에도 안전하게 숨김 처리
+        // ✅ 에러 시에도 안전하게 숨김 처리
         setIsAdmin(false);
       } finally {
         setLoading(false);
@@ -49,32 +50,27 @@ export default function AdminOnlyLinks() {
     return () => unsub();
   }, []);
 
-  // 로딩 중 또는 admin 아니면 렌더하지 않음
+  // ✅ 로딩 중 또는 admin 아니면 렌더하지 않음
   if (loading || !isAdmin) return null;
+
+  // ✅ 사이드바는 어두운 배경이므로 hover는 항상 "밝은 오버레이"로 고정 (모드 비의존)
+  const linkClass =
+    "block px-3 py-2 rounded text-inherit hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/20";
 
   return (
     <>
-      {/* Menu Setting */}
-      <Link
-        href="/contents/menu"
-        className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
-      >
+      {/* ✅ Menu Setting */}
+      <Link href="/contents/menu" className={linkClass}>
         Menu Setting
       </Link>
 
-      {/* User Management */}
-      <Link
-        href="/contents/user"
-        className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
-      >
+      {/* ✅ User Management */}
+      <Link href="/contents/user" className={linkClass}>
         User Management
       </Link>
 
-      {/* ✅ SDTM DB Manage (User Management 아래 추가) */}
-      <Link
-        href="/contents/admin/sdtm"
-        className="block px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
-      >
+      {/* ✅ SDTM DB Manage */}
+      <Link href="/contents/admin/sdtm" className={linkClass}>
         SDTM DB Manage
       </Link>
     </>
