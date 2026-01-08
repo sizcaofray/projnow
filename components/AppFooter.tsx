@@ -41,10 +41,7 @@ export default function AppFooter() {
   return (
     <footer className={`${base} border-gray-200 bg-white text-slate-900`}>
       <div className="flex h-full">
-        {/* 좌측 64px: 사이드바와 동일 톤(시각적 연결) */}
-        <div className="w-64 bg-gradient-to-b from-slate-900 to-slate-800" />
-
-        {/* 오른쪽: 메인과 동일 톤 */}
+           {/* 오른쪽: 메인과 동일 톤 */}
         <div className="flex-1 flex items-center justify-center gap-6 text-sm">
           <Link href="/contents/terms" className="hover:underline">
             이용약관
