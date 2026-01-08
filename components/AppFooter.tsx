@@ -39,7 +39,7 @@ export default function AppFooter() {
   // ✅ /contents: 좌측 64px를 "사이드바와 동일 톤"으로 이어 보이게만 처리
   // - 여기서 메뉴가 내려오는 게 아니라, 배경만 이어져 보이게 하는 방식입니다.
   return (
-    <footer className={baseClass}>
+    <footer className={`${baseClass} bg-black`}>
       <div className="h-full px-4 flex items-center justify-center gap-6 text-sm text-gray-300">
           <Link href="/contents/terms" className="hover:underline">
             이용약관
