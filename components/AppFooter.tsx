@@ -40,12 +40,7 @@ export default function AppFooter() {
   // - 여기서 메뉴가 내려오는 게 아니라, 배경만 이어져 보이게 하는 방식입니다.
   return (
     <footer className={baseClass}>
-      <div className="flex h-full">
-        {/* 🔥 핵심: sidebar와 동일한 그라데이션 */}
-        <div className="w-64 bg-gradient-to-b from-slate-900 to-slate-800" />
-
-        {/* ✅ 푸터 본문(영향 X): 항상 가운데 */}
-        <div className="flex-1 bg-black flex items-center justify-center gap-6 text-sm text-gray-300">
+      <div className="h-full px-4 flex items-center justify-center gap-6 text-sm text-gray-300">
           <Link href="/contents/terms" className="hover:underline">
             이용약관
           </Link>
@@ -53,7 +48,6 @@ export default function AppFooter() {
             개인정보처리방침
           </Link>
         </div>
-      </div>
     </footer>
   );
 }
