@@ -2,7 +2,7 @@
 // - contents 이하 레이아웃
 // ✅ 세로 경계선은 RootLayout에서 1번만 그리도록 통일
 // ✅ sidebar(border-r) 제거해서 중복선 제거
-// ✅ flyout은 RootLayout에서 overflow-x-visible로 보장 (여기서 방식 변경 없음)
+// ✅ flyout은 RootLayout에서 overflow-x-visible로 보장
 
 import type { ReactNode } from "react";
 import AdminOnlyLinks from "@/components/AdminOnlyLinks";
