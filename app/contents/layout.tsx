@@ -19,7 +19,7 @@ export default function ContentsLayout({ children }: { children: ReactNode }) {
         "
       >
         {/* ✅ Sidebar: 반드시 세로로 stretch 되도록 flex-col + min-h-0 */}
-        <aside className="w-64 bg-gradient-to-b from-slate-900 to-slate-800 flex flex-col  relative z-40">
+        <aside className="w-64 bg-gradient-to-b from-slate-900 to-slate-800 flex-1 flex-col  relative z-40">
           {/* ✅ nav가 flex-1을 가져야 사이드바 배경 높이가 끝까지 유지됨 */}
           <nav className="p-4 space-y-1 ">
             <ContentsMenuLinks />
