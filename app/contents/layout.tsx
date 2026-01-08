@@ -9,7 +9,7 @@ import ContentsMenuLinks from "@/components/ContentsMenuLinks";
 export default function ContentsLayout({ children }: { children: ReactNode }) {
   return (
     // ✅ RootLayout의 content 영역을 꽉 채우도록(세로로 늘어남)
-    <div className="flex-1 min-h-0 flex flex-col">
+    <div className="flex-1 flex flex-col">
       {/* ✅ 본문(사이드바 + 메인) 영역: 남은 높이를 전부 차지 */}
       <div
         className="
