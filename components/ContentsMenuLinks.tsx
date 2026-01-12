@@ -4,8 +4,16 @@
  * components/ContentsMenuLinks.tsx
  *
  * ✅ 목표(이번 수정)
- * - 좌측 메뉴/오버 패널이 다크모드/일반모드에 “영향받지 않도록”
- *   → dark: 클래스 제거, 배경/글자/호버 색상을 메뉴 자체 기준으로 고정(사이드바는 항상 어두운 톤)
+ * - 메뉴관리에서 adminOnly=true로 설정한 "동적 기능 메뉴"가
+ *   관리자 로그인 시 정상적으로 활성화되도록 수정
+ *
+ * ✅ 원인
+ * - layout.tsx에서 <ContentsMenuLinks /> 호출 시 isAdmin props를 넘기지 않아
+ *   기존 코드의 isAdmin=Boolean(props?.isAdmin)가 항상 false가 됨
+ *
+ * ✅ 해결
+ * - props.isAdmin이 주어지면 그것을 사용
+ * - props가 없으면 Firebase Auth + Firestore(users/{uid}.role)로 내부에서 isAdmin 계산
  *
  * ✅ 기존 유지
  * - 최상위 카테고리(parentId === null)는 비활성화 대상 아님(항상 활성)
@@ -18,8 +26,9 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
-import { getFirebaseDb } from "@/lib/firebase/client";
+import { collection, onSnapshot, orderBy, query, doc, getDoc } from "firebase/firestore";
+import { onAuthStateChanged } from "firebase/auth";
+import { getFirebaseAuth, getFirebaseDb } from "@/lib/firebase/client";
 
 type MenuDoc = {
   id: string;
@@ -37,7 +46,8 @@ type MenuDoc = {
 const COL = "menus";
 
 export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
-  const isAdmin = Boolean(props?.isAdmin);
+  // ✅ props가 오면 우선 사용, 없으면 내부에서 계산
+  const propIsAdmin = typeof props?.isAdmin === "boolean" ? props?.isAdmin : null;
 
   const db = useMemo(() => {
     try {
@@ -46,6 +56,20 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
       return null;
     }
   }, []);
+
+  const auth = useMemo(() => {
+    try {
+      return getFirebaseAuth();
+    } catch {
+      return null;
+    }
+  }, []);
+
+  // ✅ 내부 계산 관리자 여부(기본 false)
+  const [isAdminState, setIsAdminState] = useState(false);
+
+  // ✅ 최종 isAdmin
+  const isAdmin = propIsAdmin ?? isAdminState;
 
   const [menus, setMenus] = useState<MenuDoc[]>([]);
 
@@ -59,6 +83,39 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const closeTimerRef = useRef<number | null>(null);
 
+  // ✅ 관리자 판별(Props 미제공일 때만 동작)
+  useEffect(() => {
+    // props로 이미 관리자를 받는다면 내부 판별 불필요
+    if (propIsAdmin !== null) return;
+
+    if (!auth || !db) {
+      setIsAdminState(false);
+      return;
+    }
+
+    // ✅ 로그인 상태 변경 감지 → users/{uid}.role 확인
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      try {
+        if (!user) {
+          setIsAdminState(false);
+          return;
+        }
+
+        const snap = await getDoc(doc(db, "users", user.uid));
+        const role = String((snap.exists() ? (snap.data() as any)?.role : "") ?? "")
+          .trim()
+          .toLowerCase();
+
+        setIsAdminState(role === "admin");
+      } catch {
+        setIsAdminState(false);
+      }
+    });
+
+    return () => unsub();
+  }, [auth, db, propIsAdmin]);
+
+  // ✅ 동적 메뉴 로딩
   useEffect(() => {
     if (!db) return;
 
