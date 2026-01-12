@@ -1,336 +1,371 @@
 "use client";
 
-import React, { useMemo, useRef, useState } from "react";
-import * as XLSX from "xlsx";
-
 /**
- * 서버 응답과 동일한 형태의 타입(주석 포함)
+ * CRF Form Builder (새 기능 버전)
+ *
+ * 요구사항 구현:
+ * 1) 사용자별 개별 작업 저장(Firestore: crf_forms/{uid})
+ * 2) 열 구성: No.(자동), Form Name, Form Code, Repeat
+ * 3) Form Name/Form Code/Repeat 모두 수정 가능, Repeat는 체크박스
+ * 4) + / - 버튼으로 행 추가/삭제
+ * 5) Form Name, Form Code, Repeat 형식 Excel 업로드로 테이블 채우기
+ *
+ * 주의:
+ * - No.는 index+1로 자동 표시 (DB 저장 X)
+ * - Excel 업로드 시 기본 동작: "덮어쓰기"
  */
-type Visit = {
-  id: string;
-  labelOriginal: string;
-  labelDisplay: string;
-  orderKey: number;
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import * as XLSX from "xlsx";
+import { onAuthStateChanged } from "firebase/auth";
+import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+import { getFirebaseAuth, getFirebaseDb } from "@/lib/firebase/client";
+
+type FormRow = {
+  id: string; // row 고유키
+  formName: string;
+  formCode: string;
+  repeat: boolean;
+  createdAt: number; // 정렬/추적용
 };
 
-type Page = {
-  id: string;
-  name: string;
-};
+const COL = "crf_forms";
 
-type Item = {
-  id: string;
-  nameOriginal: string;
-  nameDisplay: string;
-  pageId: string;
-  evidence?: string;
-  visitMap: Record<string, boolean>;
-};
+/** 문자열 안전 변환 */
+function toStr(v: any) {
+  return String(v ?? "").trim();
+}
 
-type ParseResponse = {
-  ok: boolean;
-  fileName?: string;
-  visits?: Visit[];
-  pages?: Page[];
-  items?: Item[];
-  warnings?: string[];
-  message?: string;
-};
+/** Repeat 파싱: 체크/TRUE/Y/1 등 허용 */
+function toBoolRepeat(v: any) {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") return v !== 0;
+  return s === "y" || s === "yes" || s === "true" || s === "1" || s === "o" || s === "ok" || s === "checked";
+}
 
-function downloadBlob(filename: string, blob: Blob) {
-  // 브라우저 기본 다운로드
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+/** row id 생성 */
+function newRowId() {
+  return `r_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
 export default function CRFPage() {
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const inputExcelRef = useRef<HTMLInputElement | null>(null);
 
+  const auth = useMemo(() => {
+    try {
+      return getFirebaseAuth();
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const db = useMemo(() => {
+    try {
+      return getFirebaseDb();
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const [uid, setUid] = useState<string>("");
+  const [loadingUser, setLoadingUser] = useState(true);
+
+  const [rows, setRows] = useState<FormRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const [fileName, setFileName] = useState<string>("");
-  const [warnings, setWarnings] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+
   const [error, setError] = useState<string>("");
+  const [info, setInfo] = useState<string>("");
 
-  const [visits, setVisits] = useState<Visit[]>([]);
-  const [pages, setPages] = useState<Page[]>([]);
-  const [items, setItems] = useState<Item[]>([]);
-
-  // 드래그 UI 상태
-  const [isDragging, setIsDragging] = useState(false);
-
-  // Visit 정렬(표시용)
-  const sortedVisits = useMemo(() => {
-    return [...visits].sort((a, b) => a.orderKey - b.orderKey);
-  }, [visits]);
-
-  /**
-   * 업로드/파싱
-   */
-  const handleUpload = async (file: File) => {
-    // docx만 허용 (최소 안전장치)
-    if (!/\.docx$/i.test(file.name)) {
-      setError("docx 파일만 업로드할 수 있습니다.");
+  // ✅ (A) 로그인 사용자 식별
+  useEffect(() => {
+    if (!auth) {
+      setError("Firebase Auth 초기화 실패");
+      setLoadingUser(false);
       return;
     }
 
-    setLoading(true);
-    setError("");
-    setWarnings([]);
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setUid(user?.uid ?? "");
+      setLoadingUser(false);
+    });
 
-    try {
-      const form = new FormData();
-      form.append("file", file);
+    return () => unsub();
+  }, [auth]);
 
-      const res = await fetch("/api/crf/parse", {
-        method: "POST",
-        body: form,
-      });
+  // ✅ (B) 사용자별 데이터 로드
+  useEffect(() => {
+    const run = async () => {
+      setError("");
+      setInfo("");
 
-      const data = (await res.json()) as ParseResponse;
-
-      if (!data.ok) {
-        setError(data.message || "Parse failed.");
+      if (!db) return;
+      if (!uid) {
+        setRows([]);
         return;
       }
 
-      setFileName(data.fileName || file.name);
-      setVisits(data.visits || []);
-      setPages(data.pages || []);
-      setItems(data.items || []);
-      setWarnings(data.warnings || []);
+      setLoading(true);
+      try {
+        const ref = doc(db, COL, uid);
+        const snap = await getDoc(ref);
+
+        if (!snap.exists()) {
+          // 최초 진입: 기본 1행 생성
+          setRows([
+            {
+              id: newRowId(),
+              formName: "",
+              formCode: "",
+              repeat: false,
+              createdAt: Date.now(),
+            },
+          ]);
+          return;
+        }
+
+        const data = snap.data() as any;
+        const loaded: FormRow[] = Array.isArray(data?.rows)
+          ? data.rows
+              .map((r: any) => ({
+                id: toStr(r?.id) || newRowId(),
+                formName: toStr(r?.formName),
+                formCode: toStr(r?.formCode),
+                repeat: Boolean(r?.repeat),
+                createdAt: Number(r?.createdAt ?? Date.now()),
+              }))
+              .filter((r: FormRow) => !!r.id)
+          : [];
+
+        setRows(
+          loaded.length > 0
+            ? loaded
+            : [
+                {
+                  id: newRowId(),
+                  formName: "",
+                  formCode: "",
+                  repeat: false,
+                  createdAt: Date.now(),
+                },
+              ]
+        );
+      } catch (e: any) {
+        setError(e?.message ?? "데이터 로드 실패");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    run();
+  }, [db, uid]);
+
+  // ✅ 저장 함수(수동 저장 버튼)
+  const saveNow = async (nextRows?: FormRow[]) => {
+    setError("");
+    setInfo("");
+
+    if (!db) return setError("Firestore 초기화 실패");
+    if (!uid) return setError("로그인이 필요합니다.");
+
+    setSaving(true);
+    try {
+      const ref = doc(db, COL, uid);
+
+      // 저장할 데이터 구성
+      const payload = {
+        rows: (nextRows ?? rows).map((r) => ({
+          id: r.id,
+          formName: r.formName ?? "",
+          formCode: r.formCode ?? "",
+          repeat: !!r.repeat,
+          createdAt: Number(r.createdAt ?? Date.now()),
+        })),
+        updatedAt: serverTimestamp(),
+      };
+
+      await setDoc(ref, payload, { merge: true });
+      setInfo("저장되었습니다.");
     } catch (e: any) {
-      setError(e?.message || "Upload failed.");
+      setError(e?.message ?? "저장 실패");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ✅ 행 추가(+)
+  const addRow = () => {
+    setRows((prev) => [
+      ...prev,
+      {
+        id: newRowId(),
+        formName: "",
+        formCode: "",
+        repeat: false,
+        createdAt: Date.now(),
+      },
+    ]);
+    setInfo("");
+  };
+
+  // ✅ 행 삭제(-)
+  const removeRow = (rowId: string) => {
+    setRows((prev) => {
+      const next = prev.filter((r) => r.id !== rowId);
+      // 최소 1행 유지(원하시면 0행 허용으로 바꿔드릴 수 있습니다)
+      if (next.length === 0) {
+        return [
+          {
+            id: newRowId(),
+            formName: "",
+            formCode: "",
+            repeat: false,
+            createdAt: Date.now(),
+          },
+        ];
+      }
+      return next;
+    });
+    setInfo("");
+  };
+
+  // ✅ 셀 수정
+  const updateRow = (rowId: string, patch: Partial<FormRow>) => {
+    setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, ...patch } : r)));
+    setInfo("");
+  };
+
+  // ✅ Excel 업로드로 채워넣기(덮어쓰기)
+  const applyExcelFile = async (file: File) => {
+    setError("");
+    setInfo("");
+
+    // xlsx/xls만 허용
+    if (!/\.(xlsx|xls)$/i.test(file.name)) {
+      setError("엑셀 파일(.xlsx/.xls)만 업로드할 수 있습니다.");
+      return;
+    }
+
+    try {
+      setLoading(true);
+
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+
+      const sheetName = wb.SheetNames?.[0];
+      if (!sheetName) {
+        setError("엑셀 시트를 찾을 수 없습니다.");
+        return;
+      }
+
+      const ws = wb.Sheets[sheetName];
+
+      // ✅ 1행 헤더 기반으로 JSON 변환
+      const json = XLSX.utils.sheet_to_json<Record<string, any>>(ws, {
+        defval: "",
+      });
+
+      // 헤더 매핑(대소문자/공백 차이 대응)
+      // 기대 헤더: "Form Name", "Form Code", "Repeat"
+      // (대체 허용: "FormName", "FormCode", "Repeat", "REPEAT" 등)
+      const normalizeKey = (k: string) => k.replace(/\s+/g, "").toLowerCase();
+
+      // 첫 행을 기준으로 키 후보 수집
+      const keys = Object.keys(json?.[0] ?? {});
+      const keyMap: Record<"formName" | "formCode" | "repeat", string | null> = {
+        formName: null,
+        formCode: null,
+        repeat: null,
+      };
+
+      for (const k of keys) {
+        const nk = normalizeKey(k);
+        if (!keyMap.formName && (nk === "formname" || nk === "form_name" || nk === "name")) keyMap.formName = k;
+        if (!keyMap.formCode && (nk === "formcode" || nk === "form_code" || nk === "code")) keyMap.formCode = k;
+        if (!keyMap.repeat && nk === "repeat") keyMap.repeat = k;
+      }
+
+      // 엄격 모드: 정확히 못 찾으면 에러
+      if (!keyMap.formName || !keyMap.formCode || !keyMap.repeat) {
+        setError('엑셀 헤더가 필요합니다: "Form Name", "Form Code", "Repeat"');
+        return;
+      }
+
+      const nextRows: FormRow[] = json
+        .map((r) => {
+          const formName = toStr(r[keyMap.formName as string]);
+          const formCode = toStr(r[keyMap.formCode as string]);
+          const repeat = toBoolRepeat(r[keyMap.repeat as string]);
+
+          // 완전 빈 행은 제외
+          if (!formName && !formCode) return null;
+
+          return {
+            id: newRowId(),
+            formName,
+            formCode,
+            repeat,
+            createdAt: Date.now(),
+          } as FormRow;
+        })
+        .filter(Boolean) as FormRow[];
+
+      if (nextRows.length === 0) {
+        setError("엑셀에서 유효한 데이터 행을 찾지 못했습니다. (Form Name/Form Code 확인)");
+        return;
+      }
+
+      // ✅ 덮어쓰기
+      setRows(nextRows);
+      setInfo(`엑셀(${file.name})로 ${nextRows.length}건을 채웠습니다. 저장 버튼을 눌러 반영하세요.`);
+    } catch (e: any) {
+      setError(e?.message ?? "엑셀 읽기 실패");
     } finally {
       setLoading(false);
     }
   };
 
-  /**
-   * Drag & Drop 이벤트
-   */
-  const onDragEnter = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  };
-
-  const onDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  };
-
-  const onDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-  };
-
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-
-    const f = e.dataTransfer.files?.[0];
-    if (f) handleUpload(f);
-  };
-
-  /**
-   * Visit 라벨 수정
-   */
-  const updateVisitLabel = (visitId: string, labelDisplay: string) => {
-    setVisits((prev) => prev.map((v) => (v.id === visitId ? { ...v, labelDisplay } : v)));
-  };
-
-  /**
-   * Page 추가/수정/삭제
-   */
-  const addPage = () => {
-    setPages((prev) => [
-      ...prev,
-      { id: `p_${prev.length + 1}_${Date.now()}`, name: `New Page ${prev.length + 1}` },
-    ]);
-  };
-
-  const updatePageName = (pageId: string, name: string) => {
-    setPages((prev) => prev.map((p) => (p.id === pageId ? { ...p, name } : p)));
-  };
-
-  const removePage = (pageId: string) => {
-    // 삭제될 페이지의 아이템은 General로 이동 (General 없으면 생성)
-    const general = pages.find((p) => p.name === "General") || null;
-    const fallbackId = general?.id || `p_general_${Date.now()}`;
-
-    if (!general) {
-      setPages((pPrev) => [...pPrev, { id: fallbackId, name: "General" }]);
-    }
-
-    setPages((prev) => prev.filter((p) => p.id !== pageId));
-    setItems((prev) => prev.map((it) => (it.pageId === pageId ? { ...it, pageId: fallbackId } : it)));
-  };
-
-  /**
-   * Item 편집
-   */
-  const updateItemName = (itemId: string, nameDisplay: string) => {
-    setItems((prev) => prev.map((it) => (it.id === itemId ? { ...it, nameDisplay } : it)));
-  };
-
-  const updateItemPage = (itemId: string, pageId: string) => {
-    setItems((prev) => prev.map((it) => (it.id === itemId ? { ...it, pageId } : it)));
-  };
-
-  const toggleItemVisit = (itemId: string, visitId: string) => {
-    setItems((prev) =>
-      prev.map((it) => {
-        if (it.id !== itemId) return it;
-        const current = !!it.visitMap?.[visitId];
-        return { ...it, visitMap: { ...it.visitMap, [visitId]: !current } };
-      })
-    );
-  };
-
-  const addItem = () => {
-    const defaultPageId = pages[0]?.id || `p_general_${Date.now()}`;
-    if (!pages[0]) setPages((prev) => [...prev, { id: defaultPageId, name: "General" }]);
-
-    const visitMap: Record<string, boolean> = {};
-    for (const v of sortedVisits) visitMap[v.id] = false;
-
-    setItems((prev) => [
-      ...prev,
-      {
-        id: `i_${prev.length + 1}_${Date.now()}`,
-        nameOriginal: "",
-        nameDisplay: "New Item",
-        pageId: defaultPageId,
-        evidence: "",
-        visitMap,
-      },
-    ]);
-  };
-
-  const removeItem = (itemId: string) => setItems((prev) => prev.filter((it) => it.id !== itemId));
-
-  /**
-   * Excel 다운로드
-   */
-  const downloadExcel = () => {
-    const wb = XLSX.utils.book_new();
-
-    // Pages 시트
-    const pagesRows = pages.map((p, idx) => ({
-      ORDER: idx + 1,
-      PAGE_ID: p.id,
-      PAGE_NAME: p.name,
-    }));
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pagesRows), "Pages");
-
-    // Items 시트(동적 Visit 컬럼)
-    const visitCols = sortedVisits.map((v) => v.labelDisplay || v.labelOriginal || v.id);
-
-    const itemsRows = items.map((it) => {
-      const pageName = pages.find((p) => p.id === it.pageId)?.name || "";
-      const row: Record<string, any> = {
-        ITEM_ID: it.id,
-        PAGE_NAME: pageName,
-        ITEM_NAME: it.nameDisplay,
-        EVIDENCE: it.evidence || "",
-      };
-
-      sortedVisits.forEach((v, idx) => {
-        const colName = visitCols[idx] || v.id;
-        row[colName] = it.visitMap?.[v.id] ? "Y" : "";
-      });
-
-      return row;
-    });
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(itemsRows), "Items");
-
-    const out = XLSX.write(wb, { type: "array", bookType: "xlsx" });
-    const blob = new Blob([out], {
-      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    });
-
-    const base = fileName ? fileName.replace(/\.(docx|doc)$/i, "") : "protocol";
-    downloadBlob(`${base}_CRF.xlsx`, blob);
-  };
-
-  /**
-   * 다크모드/라이트모드 자동 대응을 위한 CSS 변수
-   * - OS/브라우저 기본 모드를 그대로 따릅니다.
-   */
+  // ✅ 기존 스타일(모드 의존 최소) 유지: CSS 변수 기반
   const themeCss = `
     .crf-wrap{
       --bg: #ffffff;
       --text: #0b0f19;
       --muted: rgba(11,15,25,0.7);
-
       --card-bg: rgba(255,255,255,0.78);
       --card-border: rgba(11,15,25,0.14);
-
       --surface: rgba(255,255,255,0.70);
-      --surface-strong: rgba(255,255,255,0.88);
-
       --border: rgba(11,15,25,0.14);
       --border-soft: rgba(11,15,25,0.10);
-
       --btn-bg: rgba(255,255,255,0.90);
       --btn-border: rgba(11,15,25,0.18);
-
-      --drop-bg: rgba(11,15,25,0.02);
-      --drop-bg-active: rgba(11,15,25,0.05);
-      --drop-border: rgba(11,15,25,0.28);
-      --drop-border-active: rgba(11,15,25,0.85);
-
       --input-bg: rgba(255,255,255,0.92);
       --input-border: rgba(11,15,25,0.18);
-
       --danger: #c31919;
+      --ok: #0a7a2f;
       --warn: #a36a00;
     }
-
     @media (prefers-color-scheme: dark){
       .crf-wrap{
         --bg: #0b0f19;
         --text: #e8eefc;
         --muted: rgba(232,238,252,0.72);
-
         --card-bg: rgba(255,255,255,0.06);
         --card-border: rgba(232,238,252,0.14);
-
         --surface: rgba(255,255,255,0.06);
-        --surface-strong: rgba(255,255,255,0.10);
-
         --border: rgba(232,238,252,0.16);
         --border-soft: rgba(232,238,252,0.10);
-
         --btn-bg: rgba(255,255,255,0.08);
         --btn-border: rgba(232,238,252,0.16);
-
-        --drop-bg: rgba(255,255,255,0.04);
-        --drop-bg-active: rgba(255,255,255,0.07);
-        --drop-border: rgba(232,238,252,0.22);
-        --drop-border-active: rgba(232,238,252,0.65);
-
         --input-bg: rgba(255,255,255,0.08);
         --input-border: rgba(232,238,252,0.18);
-
         --danger: #ff6b6b;
+        --ok: #41d17a;
         --warn: #ffb020;
       }
     }
   `;
 
-  /**
-   * 최소 스타일(인라인 + CSS 변수 사용)
-   */
   const cardStyle: React.CSSProperties = {
     border: "1px solid var(--card-border)",
     borderRadius: 12,
@@ -347,321 +382,206 @@ export default function CRFPage() {
     background: "var(--btn-bg)",
     color: "var(--text)",
     cursor: "pointer",
-    fontWeight: 700,
+    fontWeight: 800,
   };
 
   const subtleText: React.CSSProperties = { fontSize: 12, opacity: 0.85, color: "var(--muted)" };
 
-  /**
-   * 섹션 헤더(좌: 제목 / 우: 버튼) 공통 UI
-   */
   const SectionHeader = ({ title, right }: { title: string; right?: React.ReactNode }) => (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
-      <div style={{ fontWeight: 800, color: "var(--text)" }}>{title}</div>
+      <div style={{ fontWeight: 900, color: "var(--text)" }}>{title}</div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>{right}</div>
     </div>
   );
+
+  // ✅ 로그인 필요 안내
+  if (loadingUser) {
+    return (
+      <div className="crf-wrap" style={{ padding: 18, maxWidth: 1100, margin: "0 auto" }}>
+        <style>{themeCss}</style>
+        <div style={cardStyle}>로딩 중...</div>
+      </div>
+    );
+  }
+
+  if (!uid) {
+    return (
+      <div className="crf-wrap" style={{ padding: 18, maxWidth: 1100, margin: "0 auto" }}>
+        <style>{themeCss}</style>
+        <div style={cardStyle}>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>로그인이 필요합니다.</div>
+          <div style={subtleText}>Google 로그인 후 사용하실 수 있습니다.</div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="crf-wrap" style={{ padding: 18, maxWidth: 1300, margin: "0 auto" }}>
       <style>{themeCss}</style>
 
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 900, margin: 0, color: "var(--text)" }}>CRF Builder</h1>
+        <h1 style={{ fontSize: 22, fontWeight: 900, margin: 0, color: "var(--text)" }}>CRF Form Builder</h1>
         <span style={subtleText}>/contents/crf</span>
       </div>
 
-      {/* 업로드 카드 */}
+      {/* 상단 컨트롤 */}
       <div style={{ ...cardStyle, marginBottom: 14 }}>
         <SectionHeader
-          title="Protocol 업로드"
+          title="작업"
           right={
             <>
               <input
-                ref={inputRef}
+                ref={inputExcelRef}
                 type="file"
-                accept=".docx"
+                accept=".xlsx,.xls"
+                style={{ display: "none" }}
                 onChange={(e) => {
                   const f = e.target.files?.[0];
-                  if (f) handleUpload(f);
+                  if (f) applyExcelFile(f);
+                  // 같은 파일 연속 업로드 가능하게 초기화
+                  if (e.currentTarget) e.currentTarget.value = "";
                 }}
-                style={{ display: "none" }}
               />
 
-              <button type="button" style={btnStyle} onClick={() => inputRef.current?.click()} disabled={loading}>
-                파일 선택
+              <button type="button" style={btnStyle} onClick={() => inputExcelRef.current?.click()} disabled={loading}>
+                Excel 업로드(채우기)
+              </button>
+
+              <button type="button" style={btnStyle} onClick={addRow} disabled={loading}>
+                + 추가
               </button>
 
               <button
                 type="button"
                 style={{
                   ...btnStyle,
-                  opacity: items.length === 0 || visits.length === 0 ? 0.55 : 1,
-                  cursor: items.length === 0 || visits.length === 0 ? "not-allowed" : "pointer",
+                  opacity: saving ? 0.7 : 1,
+                  cursor: saving ? "not-allowed" : "pointer",
                 }}
-                onClick={downloadExcel}
-                disabled={items.length === 0 || visits.length === 0}
+                onClick={() => saveNow()}
+                disabled={saving || loading}
               >
-                Excel 다운로드
+                {saving ? "저장 중..." : "저장"}
               </button>
             </>
           }
         />
 
         <div style={subtleText}>
-          docx 파일을 드래그&드롭하거나 파일 선택으로 업로드하세요. (형식이 달라도 자동 추출 후 수정 가능)
+          엑셀 헤더는 반드시 <b style={{ color: "var(--text)" }}>Form Name / Form Code / Repeat</b> 이어야 합니다.
+          (Repeat는 TRUE/Y/1 등도 인식)
         </div>
 
-        {fileName && (
-          <div style={{ marginTop: 8, ...subtleText }}>
-            현재 파일: <b style={{ color: "var(--text)" }}>{fileName}</b>
+        {info && (
+          <div style={{ marginTop: 10, color: "var(--ok)", fontWeight: 800 }}>
+            {info}
           </div>
         )}
 
-        {/* Dropzone */}
-        <div
-          onDragEnter={onDragEnter}
-          onDragOver={onDragOver}
-          onDragLeave={onDragLeave}
-          onDrop={onDrop}
-          onClick={() => inputRef.current?.click()}
-          role="button"
-          tabIndex={0}
-          style={{
-            marginTop: 14,
-            borderRadius: 14,
-            border: isDragging ? "2px dashed var(--drop-border-active)" : "2px dashed var(--drop-border)",
-            background: isDragging ? "var(--drop-bg-active)" : "var(--drop-bg)",
-            padding: 18,
-            textAlign: "center",
-            cursor: "pointer",
-            transition: "all 120ms ease",
-            userSelect: "none",
-            color: "var(--text)",
-          }}
-        >
-          <div style={{ fontWeight: 900, fontSize: 14 }}>
-            {loading ? "파싱 중입니다..." : "여기에 Protocol(.docx)을 드래그&드롭"}
-          </div>
-          <div style={{ ...subtleText, marginTop: 6 }}>클릭해도 파일 선택창이 열립니다.</div>
-        </div>
-
-        {/* 에러/경고 */}
         {error && (
-          <div style={{ marginTop: 12, color: "var(--danger)", fontWeight: 800 }}>
+          <div style={{ marginTop: 10, color: "var(--danger)", fontWeight: 800 }}>
             오류: <span style={{ fontWeight: 500 }}>{error}</span>
-          </div>
-        )}
-
-        {warnings.length > 0 && (
-          <div style={{ marginTop: 12, color: "var(--warn)" }}>
-            <div style={{ fontWeight: 900 }}>경고</div>
-            <ul style={{ margin: "6px 0 0 18px" }}>
-              {warnings.map((w, idx) => (
-                <li key={idx} style={{ fontSize: 13 }}>
-                  {w}
-                </li>
-              ))}
-            </ul>
           </div>
         )}
       </div>
 
-      {/* Visits 편집 */}
-      {visits.length > 0 && (
-        <div style={{ ...cardStyle, marginBottom: 14 }}>
-          <SectionHeader title="Visits (방문)" />
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-            {sortedVisits.map((v) => (
-              <div
-                key={v.id}
-                style={{
-                  border: "1px solid var(--border)",
-                  borderRadius: 12,
-                  padding: 10,
-                  minWidth: 200,
-                  background: "var(--surface)",
-                  color: "var(--text)",
-                }}
-              >
-                <div style={{ fontSize: 11, opacity: 0.85, marginBottom: 6, color: "var(--muted)" }}>
-                  ID: {v.id}
-                </div>
-                <input
-                  value={v.labelDisplay}
-                  onChange={(e) => updateVisitLabel(v.id, e.target.value)}
-                  style={{
-                    width: "100%",
-                    padding: "8px 10px",
-                    borderRadius: 10,
-                    border: "1px solid var(--input-border)",
-                    background: "var(--input-bg)",
-                    color: "var(--text)",
-                    outline: "none",
-                  }}
-                />
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* 테이블 */}
+      <div style={cardStyle}>
+        <SectionHeader title="Forms" />
 
-      {/* Pages 편집 */}
-      {pages.length > 0 && (
-        <div style={{ ...cardStyle, marginBottom: 14 }}>
-          <SectionHeader
-            title="Pages (CRF 페이지 그룹)"
-            right={
-              <button type="button" style={btnStyle} onClick={addPage} disabled={loading}>
-                + 페이지 추가
-              </button>
-            }
-          />
+        <div style={{ overflowX: "auto", borderRadius: 12, border: "1px solid var(--border-soft)" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 780 }}>
+            <thead>
+              <tr>
+                <th style={{ width: 70, textAlign: "center", padding: 10, borderBottom: "1px solid var(--border)" }}>
+                  No.
+                </th>
+                <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid var(--border)" }}>
+                  Form Name
+                </th>
+                <th style={{ width: 220, textAlign: "left", padding: 10, borderBottom: "1px solid var(--border)" }}>
+                  Form Code
+                </th>
+                <th style={{ width: 110, textAlign: "center", padding: 10, borderBottom: "1px solid var(--border)" }}>
+                  Repeat
+                </th>
+                <th style={{ width: 90, textAlign: "center", padding: 10, borderBottom: "1px solid var(--border)" }}>
+                  삭제
+                </th>
+              </tr>
+            </thead>
 
-          <div style={{ overflowX: "auto", borderRadius: 12, border: "1px solid var(--border-soft)" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
-              <thead>
-                <tr>
-                  <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid var(--border)" }}>Page Name</th>
-                  <th style={{ width: 120, padding: 10, borderBottom: "1px solid var(--border)" }}>Action</th>
+            <tbody>
+              {rows.map((r, idx) => (
+                <tr key={r.id}>
+                  <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                    {idx + 1}
+                  </td>
+
+                  <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                    <input
+                      value={r.formName}
+                      onChange={(e) => updateRow(r.id, { formName: e.target.value })}
+                      style={{
+                        width: "100%",
+                        padding: "8px 10px",
+                        borderRadius: 10,
+                        border: "1px solid var(--input-border)",
+                        background: "var(--input-bg)",
+                        color: "var(--text)",
+                        outline: "none",
+                      }}
+                      placeholder="e.g., Demographics"
+                    />
+                  </td>
+
+                  <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                    <input
+                      value={r.formCode}
+                      onChange={(e) => updateRow(r.id, { formCode: e.target.value })}
+                      style={{
+                        width: "100%",
+                        padding: "8px 10px",
+                        borderRadius: 10,
+                        border: "1px solid var(--input-border)",
+                        background: "var(--input-bg)",
+                        color: "var(--text)",
+                        outline: "none",
+                      }}
+                      placeholder="e.g., DM"
+                    />
+                  </td>
+
+                  <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                    <input
+                      type="checkbox"
+                      checked={!!r.repeat}
+                      onChange={(e) => updateRow(r.id, { repeat: e.target.checked })}
+                      style={{ width: 18, height: 18 }}
+                    />
+                  </td>
+
+                  <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                    <button
+                      type="button"
+                      onClick={() => removeRow(r.id)}
+                      style={{ ...btnStyle, padding: "6px 10px" }}
+                      disabled={loading}
+                    >
+                      -
+                    </button>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {pages.map((p) => (
-                  <tr key={p.id}>
-                    <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                      <input
-                        value={p.name}
-                        onChange={(e) => updatePageName(p.id, e.target.value)}
-                        style={{
-                          width: "100%",
-                          padding: "8px 10px",
-                          borderRadius: 10,
-                          border: "1px solid var(--input-border)",
-                          background: "var(--input-bg)",
-                          color: "var(--text)",
-                          outline: "none",
-                        }}
-                      />
-                      <div style={{ fontSize: 11, opacity: 0.75, marginTop: 4, color: "var(--muted)" }}>ID: {p.id}</div>
-                    </td>
-                    <td style={{ padding: 10, textAlign: "center", borderBottom: "1px solid var(--border-soft)" }}>
-                      <button type="button" onClick={() => removePage(p.id)} style={{ ...btnStyle, padding: "6px 10px" }}>
-                        삭제
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <div style={{ ...subtleText, marginTop: 8 }}>
-            ※ 페이지 삭제 시 해당 항목은 자동으로 <b style={{ color: "var(--text)" }}>General</b>로 이동됩니다.
-          </div>
+              ))}
+            </tbody>
+          </table>
         </div>
-      )}
 
-      {/* Items */}
-      {items.length > 0 && visits.length > 0 && (
-        <div style={{ ...cardStyle }}>
-          <SectionHeader
-            title="Items (수집 항목 × 방문 매핑)"
-            right={
-              <button type="button" style={btnStyle} onClick={addItem} disabled={loading}>
-                + 항목 추가
-              </button>
-            }
-          />
-
-          <div style={{ overflowX: "auto", border: "1px solid var(--border-soft)", borderRadius: 12 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
-              <thead>
-                <tr>
-                  <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid var(--border)" }}>Item Name</th>
-                  <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid var(--border)" }}>Page</th>
-                  {sortedVisits.map((v) => (
-                    <th key={v.id} style={{ padding: 10, borderBottom: "1px solid var(--border)" }}>
-                      {v.labelDisplay}
-                    </th>
-                  ))}
-                  <th style={{ width: 80, padding: 10, borderBottom: "1px solid var(--border)" }}>Del</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {items.map((it) => (
-                  <tr key={it.id}>
-                    <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                      <input
-                        value={it.nameDisplay}
-                        onChange={(e) => updateItemName(it.id, e.target.value)}
-                        style={{
-                          width: "100%",
-                          padding: "8px 10px",
-                          borderRadius: 10,
-                          border: "1px solid var(--input-border)",
-                          background: "var(--input-bg)",
-                          color: "var(--text)",
-                          outline: "none",
-                        }}
-                      />
-                      {it.evidence && (
-                        <div style={{ fontSize: 11, opacity: 0.75, marginTop: 6, lineHeight: 1.3, color: "var(--muted)" }}>
-                          {it.evidence}
-                        </div>
-                      )}
-                    </td>
-
-                    <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                      <select
-                        value={it.pageId}
-                        onChange={(e) => updateItemPage(it.id, e.target.value)}
-                        style={{
-                          width: "100%",
-                          padding: "8px 10px",
-                          borderRadius: 10,
-                          border: "1px solid var(--input-border)",
-                          background: "var(--input-bg)",
-                          color: "var(--text)",
-                          outline: "none",
-                        }}
-                      >
-                        {pages.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-
-                    {sortedVisits.map((v) => (
-                      <td key={v.id} style={{ padding: 10, textAlign: "center", borderBottom: "1px solid var(--border-soft)" }}>
-                        <input
-                          type="checkbox"
-                          checked={!!it.visitMap?.[v.id]}
-                          onChange={() => toggleItemVisit(it.id, v.id)}
-                          style={{ width: 16, height: 16 }}
-                        />
-                      </td>
-                    ))}
-
-                    <td style={{ padding: 10, textAlign: "center", borderBottom: "1px solid var(--border-soft)" }}>
-                      <button type="button" onClick={() => removeItem(it.id)} style={{ ...btnStyle, padding: "6px 10px" }}>
-                        X
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <div style={{ ...subtleText, marginTop: 10 }}>
-            ※ 자동 추출은 문서마다 오차가 있을 수 있습니다. 여기서 수정 후 Excel로 내려받으시면 됩니다.
-          </div>
+        <div style={{ ...subtleText, marginTop: 10 }}>
+          ※ 수정 후 <b style={{ color: "var(--text)" }}>저장</b> 버튼을 눌러 Firestore에 반영하세요.
         </div>
-      )}
+      </div>
     </div>
   );
 }
