@@ -1,18 +1,14 @@
 "use client";
 
 /**
- * CRF Form Builder (새 기능 버전)
+ * CRF Form Builder
  *
- * 요구사항 구현:
- * 1) 사용자별 개별 작업 저장(Firestore: crf_forms/{uid})
- * 2) 열 구성: No.(자동), Form Name, Form Code, Repeat
- * 3) Form Name/Form Code/Repeat 모두 수정 가능, Repeat는 체크박스
- * 4) + / - 버튼으로 행 추가/삭제
- * 5) Form Name, Form Code, Repeat 형식 Excel 업로드로 테이블 채우기
- *
- * 주의:
- * - No.는 index+1로 자동 표시 (DB 저장 X)
- * - Excel 업로드 시 기본 동작: "덮어쓰기"
+ * 요구사항:
+ * - 사용자별 Firestore 저장: crf_forms/{uid}
+ * - 컬럼: No.(자동), Form Name, Form Code, Repeat(checkbox)
+ * - Form 추가/삭제
+ * - Excel 업로드로 채우기
+ * - ✅ 행 순서 조절: Drag & Drop (라이브러리 없이 HTML5 DnD)
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -22,11 +18,11 @@ import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import { getFirebaseAuth, getFirebaseDb } from "@/lib/firebase/client";
 
 type FormRow = {
-  id: string; // row 고유키
+  id: string;
   formName: string;
   formCode: string;
   repeat: boolean;
-  createdAt: number; // 정렬/추적용
+  createdAt: number;
 };
 
 const COL = "crf_forms";
@@ -36,17 +32,31 @@ function toStr(v: any) {
   return String(v ?? "").trim();
 }
 
-/** Repeat 파싱: 체크/TRUE/Y/1 등 허용 */
+/** Repeat 파싱: TRUE/FALSE, Y/N, 1/0 등 */
 function toBoolRepeat(v: any) {
-  const s = String(v ?? "").trim().toLowerCase();
   if (typeof v === "boolean") return v;
   if (typeof v === "number") return v !== 0;
+  const s = String(v ?? "").trim().toLowerCase();
   return s === "y" || s === "yes" || s === "true" || s === "1" || s === "o" || s === "ok" || s === "checked";
 }
 
 /** row id 생성 */
 function newRowId() {
   return `r_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+/** 배열에서 아이디 기준으로 reorder */
+function reorderById<T extends { id: string }>(arr: T[], activeId: string, overId: string) {
+  if (activeId === overId) return arr;
+
+  const from = arr.findIndex((x) => x.id === activeId);
+  const to = arr.findIndex((x) => x.id === overId);
+  if (from < 0 || to < 0) return arr;
+
+  const next = [...arr];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  return next;
 }
 
 export default function CRFPage() {
@@ -77,6 +87,10 @@ export default function CRFPage() {
 
   const [error, setError] = useState<string>("");
   const [info, setInfo] = useState<string>("");
+
+  // ✅ Drag & Drop 상태
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
 
   // ✅ (A) 로그인 사용자 식별
   useEffect(() => {
@@ -173,7 +187,6 @@ export default function CRFPage() {
     try {
       const ref = doc(db, COL, uid);
 
-      // 저장할 데이터 구성
       const payload = {
         rows: (nextRows ?? rows).map((r) => ({
           id: r.id,
@@ -194,7 +207,7 @@ export default function CRFPage() {
     }
   };
 
-  // ✅ 행 추가(+)
+  // ✅ Form 추가
   const addRow = () => {
     setRows((prev) => [
       ...prev,
@@ -209,11 +222,11 @@ export default function CRFPage() {
     setInfo("");
   };
 
-  // ✅ 행 삭제(-)
+  // ✅ 행 삭제
   const removeRow = (rowId: string) => {
     setRows((prev) => {
       const next = prev.filter((r) => r.id !== rowId);
-      // 최소 1행 유지(원하시면 0행 허용으로 바꿔드릴 수 있습니다)
+      // 최소 1행 유지
       if (next.length === 0) {
         return [
           {
@@ -241,7 +254,6 @@ export default function CRFPage() {
     setError("");
     setInfo("");
 
-    // xlsx/xls만 허용
     if (!/\.(xlsx|xls)$/i.test(file.name)) {
       setError("엑셀 파일(.xlsx/.xls)만 업로드할 수 있습니다.");
       return;
@@ -261,17 +273,12 @@ export default function CRFPage() {
 
       const ws = wb.Sheets[sheetName];
 
-      // ✅ 1행 헤더 기반으로 JSON 변환
       const json = XLSX.utils.sheet_to_json<Record<string, any>>(ws, {
         defval: "",
       });
 
-      // 헤더 매핑(대소문자/공백 차이 대응)
-      // 기대 헤더: "Form Name", "Form Code", "Repeat"
-      // (대체 허용: "FormName", "FormCode", "Repeat", "REPEAT" 등)
       const normalizeKey = (k: string) => k.replace(/\s+/g, "").toLowerCase();
 
-      // 첫 행을 기준으로 키 후보 수집
       const keys = Object.keys(json?.[0] ?? {});
       const keyMap: Record<"formName" | "formCode" | "repeat", string | null> = {
         formName: null,
@@ -286,7 +293,6 @@ export default function CRFPage() {
         if (!keyMap.repeat && nk === "repeat") keyMap.repeat = k;
       }
 
-      // 엄격 모드: 정확히 못 찾으면 에러
       if (!keyMap.formName || !keyMap.formCode || !keyMap.repeat) {
         setError('엑셀 헤더가 필요합니다: "Form Name", "Form Code", "Repeat"');
         return;
@@ -297,8 +303,6 @@ export default function CRFPage() {
           const formName = toStr(r[keyMap.formName as string]);
           const formCode = toStr(r[keyMap.formCode as string]);
           const repeat = toBoolRepeat(r[keyMap.repeat as string]);
-
-          // 완전 빈 행은 제외
           if (!formName && !formCode) return null;
 
           return {
@@ -316,7 +320,6 @@ export default function CRFPage() {
         return;
       }
 
-      // ✅ 덮어쓰기
       setRows(nextRows);
       setInfo(`엑셀(${file.name})로 ${nextRows.length}건을 채웠습니다. 저장 버튼을 눌러 반영하세요.`);
     } catch (e: any) {
@@ -324,6 +327,47 @@ export default function CRFPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  /**
+   * ✅ Drag & Drop 핸들러
+   * - tr 자체를 draggable로 두고,
+   * - dragstart에 rowId를 dataTransfer에 저장
+   * - dragover에서 드롭 허용 + overId 갱신
+   * - drop에서 reorder
+   */
+  const onDragStartRow = (rowId: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
+    setDraggingId(rowId);
+    setOverId(rowId);
+    setInfo("");
+    // 일부 브라우저 호환 위해 text/plain 사용
+    e.dataTransfer.setData("text/plain", rowId);
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const onDragOverRow = (rowId: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
+    e.preventDefault(); // drop 허용
+    setOverId(rowId);
+    e.dataTransfer.dropEffect = "move";
+  };
+
+  const onDropRow = (rowId: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
+    e.preventDefault();
+
+    const activeId = e.dataTransfer.getData("text/plain") || draggingId;
+    const over = rowId;
+
+    if (!activeId) return;
+
+    setRows((prev) => reorderById(prev, activeId, over));
+    setDraggingId(null);
+    setOverId(null);
+    setInfo("행 순서를 변경했습니다. 저장 버튼을 눌러 반영하세요.");
+  };
+
+  const onDragEndRow = () => {
+    setDraggingId(null);
+    setOverId(null);
   };
 
   // ✅ 기존 스타일(모드 의존 최소) 유지: CSS 변수 기반
@@ -444,33 +488,13 @@ export default function CRFPage() {
                 }}
               />
 
-              <button
-                type="button"
-                style={btnStyle}
-                onClick={() => inputExcelRef.current?.click()}
-                disabled={loading}
-              >
+              <button type="button" style={btnStyle} onClick={() => inputExcelRef.current?.click()} disabled={loading}>
                 Excel 업로드(채우기)
               </button>
 
-              <a
-                href="/CRF_Form_Template.xlsx"
-                download
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  ...btnStyle,
-                  textDecoration: "none",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                }}
-              >
-                템플릿 다운로드
-              </a>
-
+              {/* ✅ + 추가 → Form 추가 */}
               <button type="button" style={btnStyle} onClick={addRow} disabled={loading}>
-                + 추가
+                Form 추가
               </button>
 
               <button
@@ -494,11 +518,11 @@ export default function CRFPage() {
           (Repeat는 TRUE/Y/1 등도 인식)
         </div>
 
-        {info && (
-          <div style={{ marginTop: 10, color: "var(--ok)", fontWeight: 800 }}>
-            {info}
-          </div>
-        )}
+        <div style={{ ...subtleText, marginTop: 6 }}>
+          ※ 행 순서 변경: 원하는 행을 <b style={{ color: "var(--text)" }}>드래그</b>해서 다른 행 위에 놓으세요.
+        </div>
+
+        {info && <div style={{ marginTop: 10, color: "var(--ok)", fontWeight: 800 }}>{info}</div>}
 
         {error && (
           <div style={{ marginTop: 10, color: "var(--danger)", fontWeight: 800 }}>
@@ -512,15 +536,17 @@ export default function CRFPage() {
         <SectionHeader title="Forms" />
 
         <div style={{ overflowX: "auto", borderRadius: 12, border: "1px solid var(--border-soft)" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 780 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 820 }}>
             <thead>
               <tr>
+                {/* ✅ 드래그 핸들 컬럼 */}
+                <th style={{ width: 52, textAlign: "center", padding: 10, borderBottom: "1px solid var(--border)" }}>
+                  ↕
+                </th>
                 <th style={{ width: 70, textAlign: "center", padding: 10, borderBottom: "1px solid var(--border)" }}>
                   No.
                 </th>
-                <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid var(--border)" }}>
-                  Form Name
-                </th>
+                <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid var(--border)" }}>Form Name</th>
                 <th style={{ width: 220, textAlign: "left", padding: 10, borderBottom: "1px solid var(--border)" }}>
                   Form Code
                 </th>
@@ -534,73 +560,97 @@ export default function CRFPage() {
             </thead>
 
             <tbody>
-              {rows.map((r, idx) => (
-                <tr key={r.id}>
-                  <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                    {idx + 1}
-                  </td>
+              {rows.map((r, idx) => {
+                const isDragging = draggingId === r.id;
+                const isOver = overId === r.id && draggingId && draggingId !== r.id;
 
-                  <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                    <input
-                      value={r.formName}
-                      onChange={(e) => updateRow(r.id, { formName: e.target.value })}
-                      style={{
-                        width: "100%",
-                        padding: "8px 10px",
-                        borderRadius: 10,
-                        border: "1px solid var(--input-border)",
-                        background: "var(--input-bg)",
-                        color: "var(--text)",
-                        outline: "none",
-                      }}
-                      placeholder="e.g., Demographics"
-                    />
-                  </td>
+                return (
+                  <tr
+                    key={r.id}
+                    draggable
+                    onDragStart={onDragStartRow(r.id)}
+                    onDragOver={onDragOverRow(r.id)}
+                    onDrop={onDropRow(r.id)}
+                    onDragEnd={onDragEndRow}
+                    style={{
+                      opacity: isDragging ? 0.6 : 1,
+                      outline: isOver ? "2px dashed var(--warn)" : "none",
+                      outlineOffset: -2,
+                      cursor: "grab",
+                    }}
+                    title="드래그해서 순서를 변경할 수 있습니다."
+                  >
+                    {/* 드래그 핸들 표시 */}
+                    <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                      <span style={{ opacity: 0.75 }}>⋮⋮</span>
+                    </td>
 
-                  <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                    <input
-                      value={r.formCode}
-                      onChange={(e) => updateRow(r.id, { formCode: e.target.value })}
-                      style={{
-                        width: "100%",
-                        padding: "8px 10px",
-                        borderRadius: 10,
-                        border: "1px solid var(--input-border)",
-                        background: "var(--input-bg)",
-                        color: "var(--text)",
-                        outline: "none",
-                      }}
-                      placeholder="e.g., DM"
-                    />
-                  </td>
+                    <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                      {idx + 1}
+                    </td>
 
-                  <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                    <input
-                      type="checkbox"
-                      checked={!!r.repeat}
-                      onChange={(e) => updateRow(r.id, { repeat: e.target.checked })}
-                      style={{ width: 18, height: 18 }}
-                    />
-                  </td>
+                    <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                      <input
+                        value={r.formName}
+                        onChange={(e) => updateRow(r.id, { formName: e.target.value })}
+                        style={{
+                          width: "100%",
+                          padding: "8px 10px",
+                          borderRadius: 10,
+                          border: "1px solid var(--input-border)",
+                          background: "var(--input-bg)",
+                          color: "var(--text)",
+                          outline: "none",
+                        }}
+                        placeholder="e.g., Demographics"
+                      />
+                    </td>
 
-                  <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                    <button
-                      type="button"
-                      onClick={() => removeRow(r.id)}
-                      style={{ ...btnStyle, padding: "6px 10px" }}
-                      disabled={loading}
-                    >
-                      -
-                    </button>
-                  </td>
-                </tr>
-              ))}
+                    <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                      <input
+                        value={r.formCode}
+                        onChange={(e) => updateRow(r.id, { formCode: e.target.value })}
+                        style={{
+                          width: "100%",
+                          padding: "8px 10px",
+                          borderRadius: 10,
+                          border: "1px solid var(--input-border)",
+                          background: "var(--input-bg)",
+                          color: "var(--text)",
+                          outline: "none",
+                        }}
+                        placeholder="e.g., DM"
+                      />
+                    </td>
+
+                    <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                      <input
+                        type="checkbox"
+                        checked={!!r.repeat}
+                        onChange={(e) => updateRow(r.id, { repeat: e.target.checked })}
+                        style={{ width: 18, height: 18 }}
+                      />
+                    </td>
+
+                    <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                      <button
+                        type="button"
+                        onClick={() => removeRow(r.id)}
+                        style={{ ...btnStyle, padding: "6px 10px" }}
+                        disabled={loading}
+                      >
+                        -
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
 
         <div style={{ ...subtleText, marginTop: 10 }}>
-          ※ 수정 후 <b style={{ color: "var(--text)" }}>저장</b> 버튼을 눌러 Firestore에 반영하세요.
+          ※ 수정/순서변경 후 <b style={{ color: "var(--text)" }}>저장</b> 버튼을 눌러 Firestore에 반영하세요.
         </div>
       </div>
     </div>
