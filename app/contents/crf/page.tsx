@@ -444,9 +444,30 @@ export default function CRFPage() {
                 }}
               />
 
-              <button type="button" style={btnStyle} onClick={() => inputExcelRef.current?.click()} disabled={loading}>
+              <button
+                type="button"
+                style={btnStyle}
+                onClick={() => inputExcelRef.current?.click()}
+                disabled={loading}
+              >
                 Excel 업로드(채우기)
               </button>
+
+              <a
+                href="/CRF_Form_Template.xlsx"
+                download
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  ...btnStyle,
+                  textDecoration: "none",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                }}
+              >
+                템플릿 다운로드
+              </a>
 
               <button type="button" style={btnStyle} onClick={addRow} disabled={loading}>
                 + 추가
