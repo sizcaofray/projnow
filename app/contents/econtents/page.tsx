@@ -4,12 +4,20 @@ import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { getFirebaseAuth, getFirebaseDb } from "@/lib/firebase/client";
+import * as XLSX from "xlsx";
 
 /**
- * ✅ 반영사항
- * 1) 다크/라이트 전환 시 모든 영역이 반전되도록 dark: 색상 대응 추가
- * 2) 불러오기 = CRF의 Form Name/Form Code만 로드 (자동 콘텐츠 생성 X)
- * 3) eContents는 별도 테이블(/econtents/{uid})에 저장/수정 저장
+ * app/contents/econtents/page.tsx
+ *
+ * ✅ 요구사항 반영
+ * 1) Form 목록은 별도 표로 보여주지 않음 (Contents 테이블만)
+ * 2) Contents 테이블만 유지 (FormCode 병합 rowSpan)
+ * 3) 불러오기 시: CRF 폼정보를 읽어 Form별 "기본 컨텐츠 + SDTM 준하는 변수명" 자동 생성
+ * 4) 저장된 내용을 Excel로 다운로드 구현 (xlsx 사용)
+ *
+ * ✅ Firestore 구조
+ * - CRF(읽기): /crf_forms/{uid}
+ * - eContents(저장/불러오기): /econtents/{uid}
  */
 
 type CrfFormRow = {
@@ -24,9 +32,9 @@ type ContentRow = {
   id: string;
   formCode: string;
   formName: string;
-  contentName: string;
-  contentCode: string;
-  note: string;
+  contentName: string; // 표시 콘텐츠명
+  contentCode: string; // SDTM 준 변수명/코드
+  note: string; // 비고 (필요시 domain 힌트 등)
 };
 
 const CRF_COL = "crf_forms";
@@ -38,6 +46,188 @@ function toStr(v: any) {
 
 function newId(prefix = "r") {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+/**
+ * ✅ Form별 기본 콘텐츠 템플릿
+ * - contentCode는 "SDTM에 준하는 변수명/코드"를 우선 사용
+ * - 일부는 SDTM Domain 변수(AETERM 등), 일부는 흔히 쓰는 TESTCD(SYSBP 등)를 사용
+ * - note에는 도메인/힌트를 넣어 확장 시 도움되게 구성
+ */
+function buildDefaultContents(formCodeRaw: string, formNameRaw: string): Array<Omit<ContentRow, "id">> {
+  const formCode = toStr(formCodeRaw).toUpperCase();
+  const formName = toStr(formNameRaw);
+  const nameLower = formName.toLowerCase();
+
+  // ✅ 템플릿 정의 (대표 도메인 기준)
+  const templates: Record<string, Array<{ contentName: string; contentCode: string; note?: string }>> = {
+    // Demographics
+    DM: [
+      { contentName: "성별", contentCode: "SEX", note: "DM.SEX" },
+      { contentName: "생년월일", contentCode: "BRTHDTC", note: "DM.BRTHDTC" },
+      { contentName: "나이", contentCode: "AGE", note: "DM.AGE" },
+      { contentName: "인종", contentCode: "RACE", note: "DM.RACE" },
+      { contentName: "민족(해당 시)", contentCode: "ETHNIC", note: "DM.ETHNIC(또는 SUPP)" },
+      { contentName: "국가", contentCode: "COUNTRY", note: "DM.COUNTRY" },
+    ],
+
+    // Subject Visits (방문/등록/스크리닝 등)
+    SV: [
+      { contentName: "방문명", contentCode: "VISIT", note: "SV.VISIT" },
+      { contentName: "방문번호", contentCode: "VISITNUM", note: "SV.VISITNUM" },
+      { contentName: "방문일", contentCode: "SVSTDTC", note: "SV.SVSTDTC" },
+      { contentName: "방문종료일(해당 시)", contentCode: "SVENDTC", note: "SV.SVENDTC" },
+    ],
+
+    // Informed Consent
+    IC: [
+      { contentName: "동의서 서명일", contentCode: "ICDTC", note: "SC(또는 SUPP) / 관행 변수" },
+      { contentName: "동의 여부", contentCode: "ICYN", note: "관행 변수(기관/EDC마다 상이)" },
+    ],
+
+    // Inclusion/Exclusion
+    IE: [
+      { contentName: "기준구분(포함/제외)", contentCode: "IETEST", note: "IE.IETEST" },
+      { contentName: "기준코드", contentCode: "IETESTCD", note: "IE.IETESTCD" },
+      { contentName: "충족여부", contentCode: "IEORRES", note: "IE.IEORRES" },
+      { contentName: "판정(Yes/No)", contentCode: "IESTRESC", note: "IE.IESTRESC" },
+      { contentName: "평가일", contentCode: "IEDTC", note: "IE.IEDTC" },
+    ],
+
+    // Vital Signs
+    VS: [
+      { contentName: "수축기혈압", contentCode: "SYSBP", note: "VS.VSTESTCD=SYSBP" },
+      { contentName: "이완기혈압", contentCode: "DIABP", note: "VS.VSTESTCD=DIABP" },
+      { contentName: "맥박", contentCode: "PULSE", note: "VS.VSTESTCD=PULSE" },
+      { contentName: "체온", contentCode: "TEMP", note: "VS.VSTESTCD=TEMP" },
+      { contentName: "호흡수", contentCode: "RESP", note: "VS.VSTESTCD=RESP" },
+      { contentName: "측정일시", contentCode: "VSDTC", note: "VS.VSDTC" },
+    ],
+
+    // Physical Exam
+    PE: [
+      { contentName: "검사 항목", contentCode: "PETESTCD", note: "PE.PETESTCD" },
+      { contentName: "검사명", contentCode: "PETEST", note: "PE.PETEST" },
+      { contentName: "결과", contentCode: "PEORRES", note: "PE.PEORRES" },
+      { contentName: "정상여부", contentCode: "PESTRESC", note: "PE.PESTRESC" },
+      { contentName: "검사일", contentCode: "PEDTC", note: "PE.PEDTC" },
+    ],
+
+    // ECG
+    EG: [
+      { contentName: "측정항목", contentCode: "EGTESTCD", note: "EG.EGTESTCD" },
+      { contentName: "측정명", contentCode: "EGTEST", note: "EG.EGTEST" },
+      { contentName: "결과", contentCode: "EGORRES", note: "EG.EGORRES" },
+      { contentName: "단위", contentCode: "EGORRESU", note: "EG.EGORRESU" },
+      { contentName: "측정일시", contentCode: "EGDTC", note: "EG.EGDTC" },
+    ],
+
+    // Laboratory
+    LB: [
+      { contentName: "검사항목", contentCode: "LBTESTCD", note: "LB.LBTESTCD" },
+      { contentName: "검사명", contentCode: "LBTEST", note: "LB.LBTEST" },
+      { contentName: "결과", contentCode: "LBORRES", note: "LB.LBORRES" },
+      { contentName: "단위", contentCode: "LBORRESU", note: "LB.LBORRESU" },
+      { contentName: "정상범위하한", contentCode: "LBSTNRLO", note: "LB.LBSTNRLO" },
+      { contentName: "정상범위상한", contentCode: "LBSTNRHI", note: "LB.LBSTNRHI" },
+      { contentName: "검사일시", contentCode: "LBDTC", note: "LB.LBDTC" },
+    ],
+
+    // Adverse Events
+    AE: [
+      { contentName: "이상반응명", contentCode: "AETERM", note: "AE.AETERM" },
+      { contentName: "MedDRA PT(해당 시)", contentCode: "AEDECOD", note: "AE.AEDECOD" },
+      { contentName: "발현일", contentCode: "AESTDTC", note: "AE.AESTDTC" },
+      { contentName: "해소일", contentCode: "AEENDTC", note: "AE.AEENDTC" },
+      { contentName: "중증도", contentCode: "AESEV", note: "AE.AESEV" },
+      { contentName: "인과성", contentCode: "AEREL", note: "AE.AEREL" },
+      { contentName: "조치", contentCode: "AEACN", note: "AE.AEACN" },
+      { contentName: "중대성(SAE)", contentCode: "AESER", note: "AE.AESER" },
+    ],
+
+    // Concomitant Medications
+    CM: [
+      { contentName: "약물명", contentCode: "CMTRT", note: "CM.CMTRT" },
+      { contentName: "투여 시작일", contentCode: "CMSTDTC", note: "CM.CMSTDTC" },
+      { contentName: "투여 종료일", contentCode: "CMENDTC", note: "CM.CMENDTC" },
+      { contentName: "용량", contentCode: "CMDOSE", note: "CM.CMDOSE" },
+      { contentName: "단위", contentCode: "CMDOSU", note: "CM.CMDOSU" },
+      { contentName: "투여경로", contentCode: "CMROUTE", note: "CM.CMROUTE" },
+      { contentName: "투여빈도", contentCode: "CMFREQ", note: "CM.CMFREQ" },
+    ],
+
+    // Medical History
+    MH: [
+      { contentName: "병력명", contentCode: "MHTERM", note: "MH.MHTERM" },
+      { contentName: "시작일", contentCode: "MHSTDTC", note: "MH.MHSTDTC" },
+      { contentName: "종료일", contentCode: "MHENDTC", note: "MH.MHENDTC" },
+      { contentName: "지속여부", contentCode: "MHENRF", note: "MH.MHENRF(관행)" },
+    ],
+
+    // Exposure / Dosing
+    EX: [
+      { contentName: "투여명", contentCode: "EXTRT", note: "EX.EXTRT" },
+      { contentName: "투여 시작일시", contentCode: "EXSTDTC", note: "EX.EXSTDTC" },
+      { contentName: "투여 종료일시", contentCode: "EXENDTC", note: "EX.EXENDTC" },
+      { contentName: "투여량", contentCode: "EXDOSE", note: "EX.EXDOSE" },
+      { contentName: "단위", contentCode: "EXDOSU", note: "EX.EXDOSU" },
+      { contentName: "투여경로", contentCode: "EXROUTE", note: "EX.EXROUTE" },
+    ],
+
+    // Disposition
+    DS: [
+      { contentName: "상태구분", contentCode: "DSCAT", note: "DS.DSCAT" },
+      { contentName: "상태항목", contentCode: "DSTERM", note: "DS.DSTERM" },
+      { contentName: "일자", contentCode: "DSDTC", note: "DS.DSDTC" },
+      { contentName: "사유(해당 시)", contentCode: "DSREASND", note: "DS.DSREASND" },
+    ],
+  };
+
+  // 1) formCode 직접 매칭 우선
+  if (templates[formCode]) {
+    return templates[formCode].map((t) => ({
+      formCode,
+      formName,
+      contentName: t.contentName,
+      contentCode: t.contentCode,
+      note: toStr(t.note),
+    }));
+  }
+
+  // 2) 폼명 키워드 기반 추정 (현장에서 흔함)
+  const guess = (code: string) =>
+    (templates[code] ?? []).map((t) => ({
+      formCode,
+      formName,
+      contentName: t.contentName,
+      contentCode: t.contentCode,
+      note: toStr(t.note),
+    }));
+
+  if (nameLower.includes("인구") || nameLower.includes("demog")) return guess("DM");
+  if (nameLower.includes("활력") || nameLower.includes("vital")) return guess("VS");
+  if (nameLower.includes("검사") || nameLower.includes("lab")) return guess("LB");
+  if (nameLower.includes("심전") || nameLower.includes("ecg")) return guess("EG");
+  if (nameLower.includes("신체") || nameLower.includes("physical")) return guess("PE");
+  if (nameLower.includes("이상") || nameLower.includes("adverse")) return guess("AE");
+  if (nameLower.includes("병용") || nameLower.includes("concom")) return guess("CM");
+  if (nameLower.includes("병력") || nameLower.includes("history")) return guess("MH");
+  if (nameLower.includes("투여") || nameLower.includes("dose") || nameLower.includes("exposure")) return guess("EX");
+  if (nameLower.includes("스크리닝") || nameLower.includes("방문") || nameLower.includes("visit")) return guess("SV");
+  if (nameLower.includes("탈락") || nameLower.includes("종료") || nameLower.includes("disposition")) return guess("DS");
+  if (nameLower.includes("선정") || nameLower.includes("제외") || nameLower.includes("inclusion") || nameLower.includes("exclusion"))
+    return guess("IE");
+
+  // 3) 최후: 빈 1행
+  return [
+    {
+      formCode,
+      formName,
+      contentName: "",
+      contentCode: "",
+      note: "",
+    },
+  ];
 }
 
 export default function EContentsPage() {
@@ -139,10 +329,12 @@ export default function EContentsPage() {
   }, [db, uid]);
 
   /**
-   * ✅ 불러오기: CRF에서 Form 목록만 로드 (자동 콘텐츠 생성 X)
-   * - 결과는 econtents/{uid}에 forms만 저장 + rows는 빈 배열로 초기화
+   * ✅ 불러오기:
+   * - CRF에서 Form 목록을 읽고
+   * - Form별 기본 콘텐츠(통상 항목 + SDTM 준 변수명) 자동 생성
+   * - 결과를 econtents/{uid}에 저장(덮어쓰기)
    */
-  const onLoadFromCrf = async () => {
+  const onLoadFromCrfAndGenerate = async () => {
     setErrorMsg("");
     setInfoMsg("");
 
@@ -174,24 +366,35 @@ export default function EContentsPage() {
             .filter((r: CrfFormRow) => !!r.formCode || !!r.formName)
         : [];
 
-      const nextRows: ContentRow[] = []; // ✅ 자동 생성 제거
+      // ✅ Form별 기본 콘텐츠 자동 생성
+      const generatedRows: ContentRow[] = loadedForms.flatMap((f) => {
+        const base = buildDefaultContents(f.formCode, f.formName);
+        return base.map((b) => ({
+          id: newId("c"),
+          formCode: b.formCode,
+          formName: b.formName,
+          contentName: b.contentName,
+          contentCode: b.contentCode,
+          note: b.note,
+        }));
+      });
 
       await setDoc(
         doc(db, ECONTENTS_COL, uid),
         {
           forms: loadedForms,
-          rows: nextRows,
+          rows: generatedRows,
           updatedAt: Date.now(),
-          source: "crf_forms",
+          source: "crf_forms+template",
         },
         { merge: false }
       );
 
       setForms(loadedForms);
-      setRows(nextRows);
-      setInfoMsg("CRF Form 정보를 불러왔습니다. 폼별로 콘텐츠를 추가해 구성하세요.");
+      setRows(generatedRows);
+      setInfoMsg("CRF Form을 기준으로 기본 콘텐츠를 생성했습니다. 수정 후 저장/엑셀다운로드 하세요.");
     } catch (e: any) {
-      setErrorMsg(e?.message ?? "불러오기 실패");
+      setErrorMsg(e?.message ?? "불러오기/생성 실패");
     } finally {
       setLoading(false);
     }
@@ -227,6 +430,64 @@ export default function EContentsPage() {
     }
   };
 
+  /**
+   * ✅ Excel 다운로드 (현재 화면 rows 기준)
+   * - Sheet: eContents
+   * - Columns: Form Code, Form Name, Content Name, Variable(SDTM), Note
+   */
+  const onDownloadExcel = () => {
+    setErrorMsg("");
+    setInfoMsg("");
+
+    if (!rows.length) {
+      setInfoMsg("다운로드할 데이터가 없습니다.");
+      return;
+    }
+
+    try {
+      // ✅ 엑셀에 들어갈 2D 배열 구성
+      const aoa: any[][] = [];
+      aoa.push(["Form Code", "Form Name", "Content Name", "Variable", "Note"]);
+
+      // ✅ FormCode로 정렬(가독성) + 원본 순서 최대 유지
+      const sorted = [...rows].sort((a, b) => {
+        const ac = toStr(a.formCode).toUpperCase();
+        const bc = toStr(b.formCode).toUpperCase();
+        if (ac === bc) return 0;
+        return ac < bc ? -1 : 1;
+      });
+
+      for (const r of sorted) {
+        aoa.push([r.formCode, r.formName, r.contentName, r.contentCode, r.note]);
+      }
+
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+      // ✅ 열 너비(대략) 지정
+      ws["!cols"] = [{ wch: 12 }, { wch: 28 }, { wch: 26 }, { wch: 18 }, { wch: 34 }];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "eContents");
+
+      const filename = `econtents_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      XLSX.writeFile(wb, filename);
+      setInfoMsg("엑셀 파일을 다운로드했습니다.");
+    } catch (e: any) {
+      setErrorMsg(e?.message ?? "엑셀 다운로드 실패");
+    }
+  };
+
+  /** ✅ 콘텐츠 값 변경 */
+  const updateRow = (id: string, patch: Partial<ContentRow>) => {
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  };
+
+  /** ✅ 콘텐츠 행 삭제 */
+  const removeRow = (id: string) => {
+    setRows((prev) => prev.filter((r) => r.id !== id));
+  };
+
+  /** ✅ 폼별로 콘텐츠 행 추가(테이블에서 버튼 제공) */
   const addContentRow = (formCode: string, formName: string) => {
     setRows((prev) => [
       ...prev,
@@ -241,15 +502,11 @@ export default function EContentsPage() {
     ]);
   };
 
-  const updateRow = (id: string, patch: Partial<ContentRow>) => {
-    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
-  };
-
-  const removeRow = (id: string) => {
-    setRows((prev) => prev.filter((r) => r.id !== id));
-  };
-
-  // ✅ 그룹(rowSpan) 계산
+  /**
+   * ✅ 표 렌더용 그룹(rowSpan)
+   * - forms 기반 순서를 우선 유지
+   * - rows만 있고 forms가 비어있을 때도 동작하도록 fallback
+   */
   const grouped = useMemo(() => {
     const map = new Map<string, ContentRow[]>();
     for (const r of rows) {
@@ -258,24 +515,22 @@ export default function EContentsPage() {
       map.get(key)!.push(r);
     }
 
-    const order = forms.map((f) => toStr(f.formCode)).filter(Boolean);
-    const restKeys = Array.from(map.keys()).filter((k) => !order.includes(k));
-    const keys = [...order, ...restKeys].filter((k, i, a) => k && a.indexOf(k) === i);
+    const orderFromForms = forms.map((f) => toStr(f.formCode)).filter(Boolean);
+    const restKeys = Array.from(map.keys()).filter((k) => !orderFromForms.includes(k));
+    const keys = [...orderFromForms, ...restKeys].filter((k, i, a) => k && a.indexOf(k) === i);
 
     return keys.map((k) => ({
       formCode: k,
-      formName:
-        (forms.find((f) => toStr(f.formCode) === k)?.formName ?? map.get(k)?.[0]?.formName ?? "").trim(),
+      formName: (forms.find((f) => toStr(f.formCode) === k)?.formName ?? map.get(k)?.[0]?.formName ?? "").trim(),
       items: map.get(k) ?? [],
     }));
   }, [rows, forms]);
 
-  const canLoad = !loading && !loadingUser;
+  const canUseButtons = !loading && !loadingUser;
 
-  // ✅ 공통 색상(라이트/다크 반전)
+  // ✅ 다크/라이트 전환 시 반전되도록 dark: 사용 (일부만 고정되는 문제 방지)
   const cardCls =
     "rounded-2xl border border-slate-200 bg-white text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100";
-  const subTextCls = "text-slate-700 dark:text-slate-300";
   const smallTextCls = "text-slate-600 dark:text-slate-400";
   const tableWrapCls = "overflow-auto rounded-xl border border-slate-200 dark:border-slate-700";
   const theadCls = "bg-slate-50 dark:bg-slate-800";
@@ -283,12 +538,12 @@ export default function EContentsPage() {
   const hoverRowCls = "hover:bg-slate-50 dark:hover:bg-slate-800/60";
   const inputCls =
     "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-slate-500";
-  const btnLightCls =
-    "inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold transition";
-  const btnPrimaryCls = canLoad
+
+  const btnBase = "inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold transition";
+  const btnPrimary = canUseButtons
     ? "bg-slate-900 text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
     : "bg-slate-200 text-slate-500 cursor-not-allowed dark:bg-slate-800 dark:text-slate-400 cursor-not-allowed";
-  const btnOutlineCls = canLoad
+  const btnOutline = canUseButtons
     ? "bg-white text-slate-900 border border-slate-300 hover:bg-slate-50 dark:bg-slate-900 dark:text-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
     : "bg-slate-200 text-slate-500 cursor-not-allowed dark:bg-slate-800 dark:text-slate-400 cursor-not-allowed";
 
@@ -298,32 +553,38 @@ export default function EContentsPage() {
         {/* 상단 */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">eContents 구성</h1>
-            <div className={`mt-2 text-sm ${subTextCls}`}>
-              CRF에서 저장한 <span className="font-semibold">Form Name/Form Code</span>를 불러와 폼별 콘텐츠를 구성합니다.
-            </div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">eContents</h1>
             <div className={`mt-2 text-xs ${smallTextCls}`}>
-              ※ 불러오기는 <span className="font-semibold">폼 정보만</span> 가져옵니다. (자동 콘텐츠 생성 없음)
+              ※ <span className="font-semibold">불러오기</span>는 CRF Form을 기준으로 “기본 콘텐츠 + SDTM 준 변수명”을 생성합니다.
             </div>
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <button
-              onClick={onLoadFromCrf}
-              disabled={!canLoad}
-              className={`${btnLightCls} ${btnPrimaryCls}`}
-              title={!uid ? "로그인이 필요합니다." : "CRF 폼 불러오기"}
+              onClick={onLoadFromCrfAndGenerate}
+              disabled={!canUseButtons}
+              className={`${btnBase} ${btnPrimary}`}
+              title={!uid ? "로그인이 필요합니다." : "CRF 불러오기 + 기본 콘텐츠 생성"}
             >
               {loading ? "처리 중..." : "불러오기"}
             </button>
 
             <button
               onClick={onSave}
-              disabled={!canLoad}
-              className={`${btnLightCls} ${btnOutlineCls}`}
+              disabled={!canUseButtons}
+              className={`${btnBase} ${btnOutline}`}
               title={!uid ? "로그인이 필요합니다." : "eContents 저장"}
             >
               저장
+            </button>
+
+            <button
+              onClick={onDownloadExcel}
+              disabled={!canUseButtons}
+              className={`${btnBase} ${btnOutline}`}
+              title="엑셀 다운로드"
+            >
+              엑셀 다운로드
             </button>
           </div>
         </div>
@@ -340,60 +601,9 @@ export default function EContentsPage() {
           </div>
         ) : null}
 
-        {/* Form 목록 */}
+        {/* Contents 테이블만 */}
         <section className={`mt-8 p-4 ${cardCls}`}>
-          <div className="flex items-end justify-between gap-3">
-            <div>
-              <div className="text-sm font-semibold">Form 목록</div>
-              <div className={`mt-1 text-xs ${smallTextCls}`}>CRF에서 불러온 폼 정보를 표시합니다.</div>
-            </div>
-            <div className={`text-xs ${smallTextCls}`}>
-              총 <span className="font-semibold">{forms.length}</span>개
-            </div>
-          </div>
-
-          <div className={`mt-4 ${tableWrapCls}`}>
-            <table className="min-w-[720px] w-full border-separate border-spacing-0">
-              <thead>
-                <tr className={theadCls}>
-                  <th className={`${tdBorderCls} px-3 py-2 text-left text-xs font-semibold ${smallTextCls}`}>Form Code</th>
-                  <th className={`${tdBorderCls} px-3 py-2 text-left text-xs font-semibold ${smallTextCls}`}>Form Name</th>
-                  <th className={`${tdBorderCls} px-3 py-2 text-right text-xs font-semibold ${smallTextCls}`}>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {forms.length === 0 ? (
-                  <tr>
-                    <td colSpan={3} className={`px-3 py-8 text-center text-sm ${smallTextCls}`}>
-                      폼 정보가 없습니다. <span className="font-semibold">불러오기</span>로 CRF 폼을 가져오세요.
-                    </td>
-                  </tr>
-                ) : (
-                  forms.map((f) => (
-                    <tr key={f.id} className={hoverRowCls}>
-                      <td className={`${tdBorderCls} px-3 py-2 text-sm font-semibold`}>{f.formCode || "-"}</td>
-                      <td className={`${tdBorderCls} px-3 py-2 text-sm`}>{f.formName || "-"}</td>
-                      <td className={`${tdBorderCls} px-3 py-2 text-right`}>
-                        <button
-                          type="button"
-                          onClick={() => addContentRow(f.formCode, f.formName)}
-                          className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                          title="이 Form에 콘텐츠 행 추가"
-                        >
-                          + 콘텐츠 추가
-                        </button>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        {/* Contents 테이블 */}
-        <section className={`mt-8 p-4 ${cardCls}`}>
-          <div className="text-sm font-semibold">eContents 테이블</div>
+          <div className="text-sm font-semibold">Contents</div>
           <div className={`mt-1 text-xs ${smallTextCls}`}>
             1행 = 1콘텐츠 / 같은 Form 내 콘텐츠는 Form Code가 병합됩니다.
           </div>
@@ -412,7 +622,7 @@ export default function EContentsPage() {
                     Content Name
                   </th>
                   <th className={`sticky top-0 z-10 ${tdBorderCls} px-3 py-2 text-left text-xs font-semibold ${smallTextCls}`}>
-                    Content Code
+                    Variable (SDTM-like)
                   </th>
                   <th className={`sticky top-0 z-10 ${tdBorderCls} px-3 py-2 text-left text-xs font-semibold ${smallTextCls}`}>
                     Note
@@ -427,7 +637,7 @@ export default function EContentsPage() {
                 {grouped.length === 0 ? (
                   <tr>
                     <td colSpan={6} className={`px-3 py-10 text-center text-sm ${smallTextCls}`}>
-                      콘텐츠가 없습니다. 위 Form 목록에서 <span className="font-semibold">+ 콘텐츠 추가</span>로 행을 만드세요.
+                      데이터가 없습니다. 상단의 <span className="font-semibold">불러오기</span>로 CRF 기반 기본 콘텐츠를 생성하세요.
                     </td>
                   </tr>
                 ) : (
@@ -439,6 +649,7 @@ export default function EContentsPage() {
 
                       return (
                         <tr key={r.id} className={hoverRowCls}>
+                          {/* Form Code 병합 */}
                           {showMerged ? (
                             <td rowSpan={span} className={`align-top ${tdBorderCls} px-3 py-3 text-sm`}>
                               <div className="font-semibold">{g.formCode}</div>
@@ -453,6 +664,7 @@ export default function EContentsPage() {
                             </td>
                           ) : null}
 
+                          {/* Form Name 병합 */}
                           {showMerged ? (
                             <td rowSpan={span} className={`align-top ${tdBorderCls} px-3 py-3 text-sm`}>
                               {g.formName || <span className={smallTextCls}>-</span>}
@@ -464,7 +676,7 @@ export default function EContentsPage() {
                               value={r.contentName}
                               onChange={(e) => updateRow(r.id, { contentName: e.target.value })}
                               className={inputCls}
-                              placeholder="예: 나이"
+                              placeholder="예: 수축기혈압"
                             />
                           </td>
 
@@ -473,7 +685,7 @@ export default function EContentsPage() {
                               value={r.contentCode}
                               onChange={(e) => updateRow(r.id, { contentCode: e.target.value })}
                               className={inputCls}
-                              placeholder="예: AGE"
+                              placeholder="예: SYSBP / AETERM / LBTESTCD ..."
                             />
                           </td>
 
@@ -482,7 +694,7 @@ export default function EContentsPage() {
                               value={r.note}
                               onChange={(e) => updateRow(r.id, { note: e.target.value })}
                               className={inputCls}
-                              placeholder="비고"
+                              placeholder="예: VS.VSTESTCD=SYSBP"
                             />
                           </td>
 
@@ -506,7 +718,7 @@ export default function EContentsPage() {
           </div>
 
           <div className={`mt-3 text-xs ${smallTextCls}`}>
-            ※ 수정 후 상단의 <span className="font-semibold">저장</span>을 눌러 eContents에 저장하세요.
+            ※ 수정 후 <span className="font-semibold">저장</span> 또는 <span className="font-semibold">엑셀 다운로드</span>를 사용하세요.
           </div>
         </section>
       </div>
