@@ -14,35 +14,23 @@ import {
 import * as XLSX from "xlsx";
 
 /**
- * ✅ 프로젝트에 맞게 import 경로만 맞춰주세요.
- * - 기존에 쓰시는 firebase client 초기화 모듈을 그대로 사용하시면 됩니다.
+ * ✅ 프로젝트에 맞게 import 경로만 유지/수정하세요.
  */
-import { getFirebaseAuth, getFirebaseDb } from "@/lib/firebase/client"; // TODO: 경로 필요 시 수정
+import { getFirebaseAuth, getFirebaseDb } from "@/lib/firebase/client";
 
 /**
- * =========================
- * [컬렉션 설정]
- * =========================
+ * ✅ 이 메뉴는 "manage_structure_templates"만 사용합니다.
+ * - 다른 메뉴/DB에서 가져오지 않습니다.
  */
-// ✅ SDTM DB 관리에서 FormCode를 읽어오는 소스 컬렉션명(프로젝트에 맞게 수정)
-const SDTM_FORMS_COLLECTION = "sdtm_forms"; // TODO: 실제 컬렉션명으로 변경
-
-// ✅ 관리용 템플릿 테이블(서비스 공용)
 const MANAGE_TEMPLATES_COLLECTION = "manage_structure_templates";
 
 /**
- * SDTM 문서에서 FormCode를 찾기 위한 필드 후보
- * - SDTM 스키마가 확실하면 1개만 두셔도 됩니다.
- */
-const FORM_CODE_FIELD_CANDIDATES = ["formCode", "FORMCODE", "domain", "DOMAIN", "code", "CODE"] as const;
-
-/**
  * =========================
- * [타입]
+ * Types
  * =========================
  */
 type TemplateItem = {
-  id: string; // UI용 row id
+  id: string; // UI row id
   contentName: string;
   contentCode: string;
   note: string;
@@ -56,57 +44,45 @@ type TemplateDoc = {
   updatedBy?: string;
 };
 
+type ExcelTemplateRow = {
+  formCode: string;
+  formName: string;
+  contentName: string;
+  contentCode: string;
+  note: string;
+};
+
 /**
  * =========================
- * [유틸]
+ * Utils
  * =========================
  */
 function toStr(v: any) {
   return String(v ?? "").trim();
 }
 
-function newId(prefix = "r") {
-  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-}
-
 function normalizeFormCode(v: string) {
   return toStr(v).toUpperCase();
 }
 
-/**
- * SDTM 컬렉션에서 FormCode 리스트를 로드합니다.
- * - 후보 필드 중 문자열이 있으면 우선 사용
- * - 없으면 문서ID를 FormCode로 fallback
- */
-async function fetchSdtmFormCodes(db: any): Promise<string[]> {
-  const snap = await getDocs(collection(db, SDTM_FORMS_COLLECTION));
-
-  const codes: string[] = [];
-
-  snap.forEach((d) => {
-    const data = d.data() as Record<string, any>;
-
-    const found = FORM_CODE_FIELD_CANDIDATES
-      .map((k) => data[k])
-      .find((v) => typeof v === "string" && v.trim().length > 0);
-
-    if (typeof found === "string") {
-      codes.push(normalizeFormCode(found));
-      return;
-    }
-
-    // 문서ID 자체가 코드인 경우도 많음
-    if (typeof d.id === "string" && d.id.trim().length > 0) {
-      codes.push(normalizeFormCode(d.id));
-    }
-  });
-
-  return Array.from(new Set(codes)).sort((a, b) => a.localeCompare(b));
+function newId(prefix = "r") {
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
 /**
- * 템플릿 문서 로드
+ * =========================
+ * Firestore Helpers
+ * =========================
  */
+
+// ✅ 템플릿 문서 목록(formCode 목록) 로드: 템플릿 DB에서만 가져옵니다.
+async function fetchTemplateFormCodes(db: any): Promise<string[]> {
+  const snap = await getDocs(collection(db, MANAGE_TEMPLATES_COLLECTION));
+  const codes = snap.docs.map((d) => normalizeFormCode(d.id)).filter(Boolean);
+  return Array.from(new Set(codes)).sort((a, b) => a.localeCompare(b));
+}
+
+// ✅ 선택된 템플릿 로드
 async function loadTemplateDoc(db: any, formCode: string): Promise<TemplateDoc | null> {
   const code = normalizeFormCode(formCode);
   if (!code) return null;
@@ -135,10 +111,7 @@ async function loadTemplateDoc(db: any, formCode: string): Promise<TemplateDoc |
   };
 }
 
-/**
- * 템플릿 문서 저장
- * - 코드에 기본값은 없고, 현재 UI 입력 그대로 저장합니다.
- */
+// ✅ 저장(upsert)
 async function saveTemplateDoc(db: any, uid: string, formCode: string, formName: string, uiItems: TemplateItem[]) {
   const code = normalizeFormCode(formCode);
 
@@ -157,9 +130,7 @@ async function saveTemplateDoc(db: any, uid: string, formCode: string, formName:
   await setDoc(doc(db, MANAGE_TEMPLATES_COLLECTION, code), payload, { merge: true });
 }
 
-/**
- * 템플릿 문서 삭제(해당 FormCode 템플릿 초기화)
- */
+// ✅ 삭제(초기화)
 async function deleteTemplateDoc(db: any, formCode: string) {
   const code = normalizeFormCode(formCode);
   await deleteDoc(doc(db, MANAGE_TEMPLATES_COLLECTION, code));
@@ -167,138 +138,52 @@ async function deleteTemplateDoc(db: any, formCode: string) {
 
 /**
  * =========================
- * [Excel I/O 스펙]
+ * Excel Parse / Upload
  * =========================
- * 업로드/다운로드 공통 스펙:
- * - Sheet "templates"
- *   columns: formCode, formName, contentName, contentCode, note
- *
- * 참고 Sheet(템플릿 다운로드에만 포함):
- * - Sheet "sdtm_formcodes"
- *   columns: formCode
  */
-type ExcelTemplateRow = {
-  formCode: string;
-  formName: string;
-  contentName: string;
-  contentCode: string;
-  note: string;
-};
 
-/**
- * 엑셀 파일 -> 템플릿 rows 파싱
- */
+// ✅ 업로드 엑셀 파싱: templates 시트 우선
 function parseExcelTemplates(file: File): Promise<ExcelTemplateRow[]> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
 
-    // ✅ 파일 읽기 성공
     reader.onload = (e) => {
       try {
         const data = new Uint8Array(e.target?.result as ArrayBuffer);
         const wb = XLSX.read(data, { type: "array" });
 
-        // ✅ "templates" 시트가 우선, 없으면 첫 시트 사용
         const sheetName = wb.SheetNames.includes("templates") ? "templates" : wb.SheetNames[0];
         const ws = wb.Sheets[sheetName];
         if (!ws) return resolve([]);
 
-        // ✅ JSON 변환
         const json = XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: "" });
 
+        // ✅ 컬럼명은 formCode/formName/contentName/contentCode/note 기준
         const rows: ExcelTemplateRow[] = json.map((r) => ({
           formCode: normalizeFormCode(toStr(r.formCode ?? r.FormCode ?? r["Form Code"] ?? r["FORM CODE"])),
           formName: toStr(r.formName ?? r.FormName ?? r["Form Name"] ?? r["FORM NAME"]),
           contentName: toStr(r.contentName ?? r.ContentName ?? r["Content Name"] ?? r["CONTENT NAME"]),
-          contentCode: toStr(r.contentCode ?? r.ContentCode ?? r["Content Code"] ?? r["Variable"] ?? r["VARIABLE"]),
-          note: toStr(r.note ?? r.Note ?? r["Note"] ?? r["NOTE"]),
+          contentCode: toStr(r.contentCode ?? r.ContentCode ?? r["Content Code"] ?? r["VARIABLE"] ?? r["Variable"]),
+          note: toStr(r.note ?? r.Note ?? r["NOTE"] ?? r["Note"]),
         }));
 
-        // ✅ 유효한 row만
-        const filtered = rows.filter((x) => x.formCode && (x.contentName || x.contentCode || x.note || x.formName));
+        // ✅ 유효 row만
+        const filtered = rows.filter(
+          (x) => x.formCode && (x.formName || x.contentName || x.contentCode || x.note)
+        );
         resolve(filtered);
       } catch (err) {
         reject(err);
       }
     };
 
-    // ✅ 파일 읽기 실패
-    reader.onerror = () => reject(new Error("엑셀 파일을 읽는 중 오류가 발생했습니다."));
-
+    reader.onerror = () => reject(new Error("엑셀 파일 읽기 실패"));
     reader.readAsArrayBuffer(file);
   });
 }
 
-/**
- * DB 템플릿 전체 -> 엑셀 다운로드 (기본 내용 포함: DB에 저장된 것)
- */
-function downloadTemplatesExcel(allRows: ExcelTemplateRow[], filename: string, sdtmCodes?: string[]) {
-  // ✅ templates 시트 구성
-  const aoa: any[][] = [];
-  aoa.push(["formCode", "formName", "contentName", "contentCode", "note"]);
-  for (const r of allRows) {
-    aoa.push([r.formCode, r.formName, r.contentName, r.contentCode, r.note]);
-  }
-
-  const ws1 = XLSX.utils.aoa_to_sheet(aoa);
-  ws1["!cols"] = [{ wch: 12 }, { wch: 28 }, { wch: 26 }, { wch: 18 }, { wch: 34 }];
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws1, "templates");
-
-  // ✅ 참고용 SDTM formcodes 시트(옵션)
-  if (Array.isArray(sdtmCodes) && sdtmCodes.length > 0) {
-    const aoa2: any[][] = [];
-    aoa2.push(["formCode"]);
-    for (const c of sdtmCodes) aoa2.push([c]);
-    const ws2 = XLSX.utils.aoa_to_sheet(aoa2);
-    ws2["!cols"] = [{ wch: 12 }];
-    XLSX.utils.book_append_sheet(wb, ws2, "sdtm_formcodes");
-  }
-
-  XLSX.writeFile(wb, filename);
-}
-
-/**
- * DB의 모든 템플릿 문서를 가져와 ExcelTemplateRow 형태로 펼침
- */
-async function fetchAllTemplatesAsRows(db: any): Promise<ExcelTemplateRow[]> {
-  const snap = await getDocs(collection(db, MANAGE_TEMPLATES_COLLECTION));
-  const out: ExcelTemplateRow[] = [];
-
-  snap.forEach((d) => {
-    const data = d.data() as any;
-    const formCode = normalizeFormCode(toStr(data?.formCode || d.id));
-    const formName = toStr(data?.formName);
-
-    const rawItems = Array.isArray(data?.items) ? data.items : [];
-    rawItems.forEach((it: any) => {
-      out.push({
-        formCode,
-        formName,
-        contentName: toStr(it?.contentName),
-        contentCode: toStr(it?.contentCode),
-        note: toStr(it?.note),
-      });
-    });
-
-    // ✅ items가 없어도 문서가 존재할 수 있으니 최소 1행을 만들지 않습니다(하드코딩 금지/빈값 생성 금지).
-  });
-
-  // ✅ 정렬
-  out.sort((a, b) => {
-    if (a.formCode === b.formCode) return a.contentCode.localeCompare(b.contentCode);
-    return a.formCode.localeCompare(b.formCode);
-  });
-
-  return out;
-}
-
-/**
- * 엑셀 업로드 rows -> formCode별로 묶어 DB에 upsert
- */
-async function upsertTemplatesFromRows(db: any, uid: string, rows: ExcelTemplateRow[]) {
-  // ✅ formCode 기준 그룹핑
+// ✅ rows -> formCode별 그룹핑(즉시 UI 반영용)
+function groupRowsToUi(rows: ExcelTemplateRow[]) {
   const map = new Map<string, { formName: string; items: TemplateItem[] }>();
 
   for (const r of rows) {
@@ -308,11 +193,13 @@ async function upsertTemplatesFromRows(db: any, uid: string, rows: ExcelTemplate
     if (!map.has(code)) {
       map.set(code, { formName: toStr(r.formName), items: [] });
     }
+
     const g = map.get(code)!;
 
-    // formName이 비어있다면 뒤에 온 값으로라도 채움(엑셀에 섞여있을 수 있음)
+    // formName이 비어있다면 뒤에 나오는 값으로 채움
     if (!g.formName && r.formName) g.formName = toStr(r.formName);
 
+    // ✅ 빈 아이템만 들어가는 걸 방지(그래도 업로드 row는 유효 row만 이미 걸렀음)
     g.items.push({
       id: newId("it"),
       contentName: toStr(r.contentName),
@@ -321,17 +208,21 @@ async function upsertTemplatesFromRows(db: any, uid: string, rows: ExcelTemplate
     });
   }
 
-  // ✅ upsert
-  for (const [code, v] of map.entries()) {
+  const codes = Array.from(map.keys()).sort((a, b) => a.localeCompare(b));
+  return { map, codes };
+}
+
+// ✅ DB upsert
+async function upsertGroupedToDb(db: any, uid: string, grouped: Map<string, { formName: string; items: TemplateItem[] }>) {
+  for (const [code, v] of grouped.entries()) {
     await saveTemplateDoc(db, uid, code, v.formName, v.items);
   }
-
-  return map.size;
+  return grouped.size;
 }
 
 /**
  * =========================
- * [페이지 컴포넌트]
+ * Page
  * =========================
  */
 export default function ManageStructurePage() {
@@ -360,21 +251,17 @@ export default function ManageStructurePage() {
   const [errorMsg, setErrorMsg] = useState("");
   const [infoMsg, setInfoMsg] = useState("");
 
-  // SDTM에서 가져온 FormCode 목록
+  // ✅ 이 메뉴는 템플릿 DB에서 formCode 목록을 구성
   const [formCodes, setFormCodes] = useState<string[]>([]);
-
-  // 선택된 FormCode
   const [selectedFormCode, setSelectedFormCode] = useState<string>("");
 
-  // 현재 편집 중 템플릿
+  // 현재 편집 상태
   const [formName, setFormName] = useState<string>("");
   const [items, setItems] = useState<TemplateItem[]>([]);
-
-  // 저장 전 변경 여부
   const [dirty, setDirty] = useState(false);
 
   /**
-   * 로그인 상태
+   * Auth
    */
   useEffect(() => {
     if (!auth) {
@@ -392,9 +279,10 @@ export default function ManageStructurePage() {
   }, [auth]);
 
   /**
-   * SDTM에서 FormCode 목록 로드
+   * ✅ 목록 다시 가져오기(템플릿 DB에서)
+   * - 경고(confirm) 포함
    */
-  const loadFormCodeList = useCallback(
+  const reloadFromTemplateDb = useCallback(
     async (withConfirmIfDirty: boolean) => {
       setErrorMsg("");
       setInfoMsg("");
@@ -404,53 +292,49 @@ export default function ManageStructurePage() {
 
       if (withConfirmIfDirty && dirty) {
         const ok = window.confirm(
-          "다시 가져오기를 진행하면 현재 편집 중인 내용(저장 전 변경사항)이 초기화됩니다.\n계속 진행하시겠습니까?"
+          "다시 가져오기를 진행하면 현재 화면의 편집 내용(저장 전 변경사항)이 초기화됩니다.\n계속 진행하시겠습니까?"
         );
-        if (!ok) {
-          setInfoMsg("취소되었습니다.");
-          return;
-        }
+        if (!ok) return;
       }
 
       setLoading(true);
       try {
-        const codes = await fetchSdtmFormCodes(db);
+        const codes = await fetchTemplateFormCodes(db);
         setFormCodes(codes);
 
-        // ✅ 선택 코드 정리
-        if (!selectedFormCode || !codes.includes(selectedFormCode)) {
-          const first = codes[0] ?? "";
-          setSelectedFormCode(first);
+        if (!codes.length) {
+          // 템플릿 DB가 비어있으면 화면도 빈 상태
+          setSelectedFormCode("");
           setFormName("");
           setItems([]);
           setDirty(false);
-
-          // ✅ 첫 코드 템플릿 자동 로드
-          if (first) {
-            const tpl = await loadTemplateDoc(db, first);
-            if (tpl) {
-              setFormName(tpl.formName ?? "");
-              setItems(
-                (tpl.items ?? []).map((it) => ({
-                  id: newId("it"),
-                  contentName: it.contentName,
-                  contentCode: it.contentCode,
-                  note: it.note,
-                }))
-              );
-            }
-          }
+          setInfoMsg("템플릿 DB에 데이터가 없습니다. 엑셀 업로드 또는 +행 추가 후 저장하세요.");
+          return;
         }
 
-        setInfoMsg(`SDTM에서 FormCode ${codes.length}개를 불러왔습니다.`);
+        const next = codes.includes(selectedFormCode) ? selectedFormCode : codes[0];
+        setSelectedFormCode(next);
+
+        const tpl = await loadTemplateDoc(db, next);
+        if (tpl) {
+          setFormName(tpl.formName ?? "");
+          setItems(
+            (tpl.items ?? []).map((it) => ({
+              id: newId("it"),
+              contentName: it.contentName,
+              contentCode: it.contentCode,
+              note: it.note,
+            }))
+          );
+        } else {
+          setFormName("");
+          setItems([]);
+        }
+
+        setDirty(false);
+        setInfoMsg(`템플릿 DB에서 ${codes.length}개 FormCode를 불러왔습니다.`);
       } catch (e: any) {
-        // ✅ 권한 오류 메시지 친절히 안내
-        const msg = e?.message ?? "FormCode 불러오기 실패";
-        setErrorMsg(
-          msg.includes("permission") || msg.includes("Missing or insufficient permissions")
-            ? "권한이 없습니다. Firestore Rules에서 sdtm_forms(read) 권한을 허용해 주세요."
-            : msg
-        );
+        setErrorMsg(e?.message ?? "템플릿 목록 불러오기 실패");
       } finally {
         setLoading(false);
       }
@@ -458,39 +342,38 @@ export default function ManageStructurePage() {
     [db, uid, dirty, selectedFormCode]
   );
 
-  // 최초 로드
+  // 최초 진입 시 템플릿 DB에서 목록 구성
   useEffect(() => {
     if (!db) return;
     if (!uid) return;
-    loadFormCodeList(false);
-  }, [db, uid, loadFormCodeList]);
+    reloadFromTemplateDb(false);
+  }, [db, uid, reloadFromTemplateDb]);
 
   /**
-   * 선택된 FormCode의 템플릿 로드
+   * ✅ FormCode 선택 시 템플릿 로드
    */
-  const loadSelectedTemplate = useCallback(
-    async (code: string, withConfirmIfDirty: boolean) => {
+  const onSelectFormCode = useCallback(
+    async (code: string) => {
       setErrorMsg("");
       setInfoMsg("");
 
       if (!db) return setErrorMsg("Firestore 초기화 실패");
       if (!uid) return setErrorMsg("로그인이 필요합니다.");
 
-      const nextCode = normalizeFormCode(code);
-      if (!nextCode) return;
+      const next = normalizeFormCode(code);
+      if (!next) return;
 
-      if (withConfirmIfDirty && dirty) {
+      if (dirty) {
         const ok = window.confirm(
-          "FormCode를 변경하면 현재 편집 중인 내용(저장 전 변경사항)이 초기화됩니다.\n계속 진행하시겠습니까?"
+          "FormCode를 변경하면 현재 화면의 편집 내용(저장 전 변경사항)이 초기화됩니다.\n계속 진행하시겠습니까?"
         );
         if (!ok) return;
       }
 
       setLoading(true);
       try {
-        const tpl = await loadTemplateDoc(db, nextCode);
-
-        setSelectedFormCode(nextCode);
+        const tpl = await loadTemplateDoc(db, next);
+        setSelectedFormCode(next);
 
         if (tpl) {
           setFormName(tpl.formName ?? "");
@@ -502,22 +385,16 @@ export default function ManageStructurePage() {
               note: it.note,
             }))
           );
-          setInfoMsg(`템플릿을 불러왔습니다. (${nextCode})`);
+          setInfoMsg(`템플릿을 불러왔습니다. (${next})`);
         } else {
-          // ✅ 템플릿 없으면 빈 상태 (하드코딩 없음)
           setFormName("");
           setItems([]);
-          setInfoMsg(`저장된 템플릿이 없습니다. (${nextCode}) 빈 상태로 시작합니다.`);
+          setInfoMsg(`저장된 템플릿이 없습니다. (${next})`);
         }
 
         setDirty(false);
       } catch (e: any) {
-        const msg = e?.message ?? "템플릿 불러오기 실패";
-        setErrorMsg(
-          msg.includes("permission") || msg.includes("Missing or insufficient permissions")
-            ? "권한이 없습니다. Firestore Rules에서 manage_structure_templates(read) 권한을 허용해 주세요."
-            : msg
-        );
+        setErrorMsg(e?.message ?? "템플릿 불러오기 실패");
       } finally {
         setLoading(false);
       }
@@ -526,13 +403,10 @@ export default function ManageStructurePage() {
   );
 
   /**
-   * 아이템 조작
+   * UI actions
    */
   const addItem = () => {
-    setItems((prev) => [
-      ...prev,
-      { id: newId("it"), contentName: "", contentCode: "", note: "" }, // ✅ 빈 행(하드코딩 없음)
-    ]);
+    setItems((prev) => [...prev, { id: newId("it"), contentName: "", contentCode: "", note: "" }]);
     setDirty(true);
   };
 
@@ -562,7 +436,7 @@ export default function ManageStructurePage() {
   };
 
   /**
-   * 저장
+   * Save
    */
   const onSave = async () => {
     setErrorMsg("");
@@ -570,27 +444,25 @@ export default function ManageStructurePage() {
 
     if (!db) return setErrorMsg("Firestore 초기화 실패");
     if (!uid) return setErrorMsg("로그인이 필요합니다.");
-    if (!selectedFormCode) return setErrorMsg("FormCode를 선택해 주세요.");
+    if (!selectedFormCode) return setErrorMsg("FormCode를 먼저 선택하거나 업로드하세요.");
 
     setLoading(true);
     try {
       await saveTemplateDoc(db, uid, selectedFormCode, formName, items);
       setDirty(false);
       setInfoMsg(`저장되었습니다. (${selectedFormCode})`);
+
+      // ✅ 저장 후 목록 갱신 (이 메뉴 내부에서만)
+      await reloadFromTemplateDb(false);
     } catch (e: any) {
-      const msg = e?.message ?? "저장 실패";
-      setErrorMsg(
-        msg.includes("permission") || msg.includes("Missing or insufficient permissions")
-          ? "권한이 없습니다. Firestore Rules에서 manage_structure_templates(write) 권한을 admin에게 허용해 주세요."
-          : msg
-      );
+      setErrorMsg(e?.message ?? "저장 실패");
     } finally {
       setLoading(false);
     }
   };
 
   /**
-   * 템플릿 초기화(문서 삭제)
+   * Reset template doc
    */
   const onResetTemplate = async () => {
     setErrorMsg("");
@@ -600,9 +472,7 @@ export default function ManageStructurePage() {
     if (!uid) return setErrorMsg("로그인이 필요합니다.");
     if (!selectedFormCode) return setErrorMsg("FormCode를 선택해 주세요.");
 
-    const ok = window.confirm(
-      "이 FormCode의 템플릿을 초기화(삭제)합니다.\n계속 진행하시겠습니까?"
-    );
+    const ok = window.confirm("이 FormCode의 템플릿을 초기화(삭제)합니다.\n계속 진행하시겠습니까?");
     if (!ok) return;
 
     setLoading(true);
@@ -612,88 +482,20 @@ export default function ManageStructurePage() {
       setItems([]);
       setDirty(false);
       setInfoMsg(`템플릿을 삭제했습니다. (${selectedFormCode})`);
+
+      await reloadFromTemplateDb(false);
     } catch (e: any) {
-      const msg = e?.message ?? "삭제 실패";
-      setErrorMsg(
-        msg.includes("permission") || msg.includes("Missing or insufficient permissions")
-          ? "권한이 없습니다. Firestore Rules에서 manage_structure_templates(delete/write) 권한을 admin에게 허용해 주세요."
-          : msg
-      );
+      setErrorMsg(e?.message ?? "삭제 실패");
     } finally {
       setLoading(false);
     }
   };
 
   /**
-   * 다시 가져오기(SDTM FormCode 목록 재로딩)
+   * Excel upload
+   * ✅ 업로드 즉시 화면에 "참고용 컨텐츠"가 생성되어야 함
    */
-  const onReimportCodes = async () => {
-    await loadFormCodeList(true);
-  };
-
-  /**
-   * =========================
-   * [엑셀 다운로드] - DB 템플릿 전체(기본 내용 포함)
-   * =========================
-   */
-  const onDownloadAllTemplates = async () => {
-    setErrorMsg("");
-    setInfoMsg("");
-
-    if (!db) return setErrorMsg("Firestore 초기화 실패");
-    if (!uid) return setErrorMsg("로그인이 필요합니다.");
-
-    setLoading(true);
-    try {
-      const allRows = await fetchAllTemplatesAsRows(db);
-
-      const filename = `manage_structure_templates_${new Date().toISOString().slice(0, 10)}.xlsx`;
-      // ✅ sdtm_formcodes 시트도 같이 넣어줌(참고용)
-      downloadTemplatesExcel(allRows, filename, formCodes);
-
-      setInfoMsg("DB에 저장된 템플릿 전체를 엑셀로 다운로드했습니다.");
-    } catch (e: any) {
-      const msg = e?.message ?? "다운로드 실패";
-      setErrorMsg(
-        msg.includes("permission") || msg.includes("Missing or insufficient permissions")
-          ? "권한이 없습니다. Firestore Rules에서 manage_structure_templates(read) 권한을 허용해 주세요."
-          : msg
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  /**
-   * =========================
-   * [업로드용 엑셀 템플릿 다운로드]
-   * - headers + 참고용 SDTM formcodes 시트
-   * - 기본 콘텐츠를 코드에 하드코딩하지 않습니다.
-   * =========================
-   */
-  const onDownloadUploadTemplate = async () => {
-    setErrorMsg("");
-    setInfoMsg("");
-
-    // ✅ 업로드용은 빈 templates 시트(헤더만) + sdtm_formcodes 시트(참고용)
-    const filename = `manage_structure_upload_template_${new Date().toISOString().slice(0, 10)}.xlsx`;
-    downloadTemplatesExcel([], filename, formCodes);
-    setInfoMsg("업로드용 엑셀 템플릿을 다운로드했습니다. (templates 시트에 내용을 입력 후 업로드)");
-  };
-
-  /**
-   * =========================
-   * [엑셀 업로드]
-   * - templates 시트를 읽어 formCode별로 manage_structure_templates에 저장(upsert)
-   * =========================
-   */
-  const onClickUpload = () => {
-    if (!uid) {
-      setErrorMsg("로그인이 필요합니다.");
-      return;
-    }
-    uploadRef.current?.click();
-  };
+  const onClickUpload = () => uploadRef.current?.click();
 
   const onUploadExcel = async (file: File) => {
     setErrorMsg("");
@@ -702,41 +504,53 @@ export default function ManageStructurePage() {
     if (!db) return setErrorMsg("Firestore 초기화 실패");
     if (!uid) return setErrorMsg("로그인이 필요합니다.");
 
-    // ✅ 업로드는 편집 중 내용이 영향을 받을 수 있으므로 confirm
-    if (dirty || items.length > 0 || formName) {
+    if (dirty) {
       const ok = window.confirm(
-        "엑셀 업로드를 진행하면 현재 편집 중인 내용과 DB 템플릿이 변경될 수 있습니다.\n계속 진행하시겠습니까?"
+        "엑셀 업로드를 진행하면 현재 화면의 편집 내용(저장 전 변경사항)이 초기화될 수 있습니다.\n계속 진행하시겠습니까?"
       );
-      if (!ok) {
-        setInfoMsg("취소되었습니다.");
-        return;
-      }
+      if (!ok) return;
     }
 
     setLoading(true);
     try {
       const rows = await parseExcelTemplates(file);
-      if (rows.length === 0) {
-        setInfoMsg("업로드한 엑셀에서 유효한 데이터가 없습니다. (templates 시트/컬럼명을 확인하세요)");
+      if (!rows.length) {
+        setInfoMsg("엑셀에서 유효 데이터가 없습니다. (templates 시트/헤더를 확인하세요)");
         return;
       }
 
-      const count = await upsertTemplatesFromRows(db, uid, rows);
+      // ✅ 1) 업로드 데이터로 즉시 화면 생성(참고용 컨텐츠 표시)
+      const { map, codes } = groupRowsToUi(rows);
+      const first = codes[0] || "";
 
-      // ✅ 현재 선택된 코드가 업로드로 변경되었을 수 있으니 재로딩
-      if (selectedFormCode) {
-        await loadSelectedTemplate(selectedFormCode, false);
+      if (first) {
+        const firstGroup = map.get(first)!;
+        setSelectedFormCode(first);
+        setFormName(firstGroup.formName ?? "");
+        setItems(firstGroup.items ?? []);
+        setDirty(false);
+        setInfoMsg(`엑셀을 읽어 화면에 반영했습니다. (첫 폼: ${first})`);
+      } else {
+        setSelectedFormCode("");
+        setFormName("");
+        setItems([]);
+        setDirty(false);
+        setInfoMsg("엑셀은 읽었지만 formCode가 없습니다.");
       }
 
-      setInfoMsg(`엑셀 업로드 완료: ${count}개 FormCode 템플릿이 저장(업데이트)되었습니다.`);
-      setDirty(false);
+      // ✅ 2) 동시에 DB 저장(upsert)
+      const savedCount = await upsertGroupedToDb(db, uid, map);
+
+      // ✅ 3) 템플릿 DB 기준 목록 갱신 + 첫 코드 유지
+      await reloadFromTemplateDb(false);
+      if (first) {
+        // 갱신 후에도 첫 코드로 로드해서 "DB 저장 반영"을 확인할 수 있게 함
+        await onSelectFormCode(first);
+      }
+
+      setInfoMsg(`업로드 완료: ${savedCount}개 템플릿 저장 및 화면 반영 완료 (첫 폼: ${first || "-"})`);
     } catch (e: any) {
-      const msg = e?.message ?? "엑셀 업로드 실패";
-      setErrorMsg(
-        msg.includes("permission") || msg.includes("Missing or insufficient permissions")
-          ? "권한이 없습니다. Firestore Rules에서 manage_structure_templates(write) 권한을 admin에게 허용해 주세요."
-          : msg
-      );
+      setErrorMsg(e?.message ?? "엑셀 업로드 실패");
     } finally {
       setLoading(false);
     }
@@ -744,7 +558,7 @@ export default function ManageStructurePage() {
 
   const canUse = !loading && !loadingAuth && !!uid;
 
-  // ✅ UI 클래스(기존 스타일과 충돌 최소)
+  // UI class (기존 스타일 유지)
   const card =
     "rounded-2xl border border-slate-200 bg-white text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100";
   const subText = "text-slate-600 dark:text-slate-400";
@@ -765,15 +579,14 @@ export default function ManageStructurePage() {
           <div>
             <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">Manage Structure Templates</h1>
             <div className={`mt-2 text-xs ${subText}`}>
-              ※ eContents의 “CRF 가져오기”가 참조하는 템플릿 DB:
-              <span className="font-mono"> {MANAGE_TEMPLATES_COLLECTION}</span>
+              ※ 이 메뉴는 <span className="font-mono">{MANAGE_TEMPLATES_COLLECTION}</span>만 사용합니다.
               <br />
-              ※ 코드에 기본 콘텐츠를 고정하지 않습니다. <span className="font-semibold">기본 내용</span>은 DB에 저장된 템플릿을 내려받는 방식입니다.
+              ※ 엑셀 업로드 시 이 화면(표)에 즉시 반영되며, 동시에 DB에도 저장됩니다.
             </div>
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <button onClick={onReimportCodes} disabled={!canUse} className={`${btnBase} ${btnOutline}`}>
+            <button onClick={() => reloadFromTemplateDb(true)} disabled={!canUse} className={`${btnBase} ${btnOutline}`}>
               다시 가져오기
             </button>
             <button onClick={onResetTemplate} disabled={!canUse} className={`${btnBase} ${btnOutline}`}>
@@ -785,19 +598,11 @@ export default function ManageStructurePage() {
           </div>
         </div>
 
-        {/* 엑셀 버튼 영역 */}
+        {/* Upload */}
         <div className="mt-4 flex flex-wrap gap-2">
-          <button onClick={onDownloadAllTemplates} disabled={!canUse} className={`${btnBase} ${btnOutline}`}>
-            템플릿 전체 다운로드
-          </button>
-          <button onClick={onDownloadUploadTemplate} disabled={!canUse} className={`${btnBase} ${btnOutline}`}>
-            업로드용 템플릿 다운로드
-          </button>
           <button onClick={onClickUpload} disabled={!canUse} className={`${btnBase} ${btnOutline}`}>
             엑셀 업로드
           </button>
-
-          {/* ✅ 숨김 파일 업로드 input */}
           <input
             ref={uploadRef}
             type="file"
@@ -805,7 +610,6 @@ export default function ManageStructurePage() {
             className="hidden"
             onChange={(e) => {
               const f = e.target.files?.[0];
-              // ✅ 같은 파일 재업로드 가능하도록 value 초기화
               e.currentTarget.value = "";
               if (!f) return;
               onUploadExcel(f);
@@ -835,20 +639,18 @@ export default function ManageStructurePage() {
           </div>
         ) : null}
 
-        {/* 선택/편집 영역 */}
         <section className={`mt-8 p-4 ${card}`}>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-            {/* FormCode 선택 */}
             <div>
               <div className="text-sm font-semibold">Form Code</div>
               <div className={`mt-1 text-xs ${subText}`}>
-                SDTM Source: <span className="font-mono">{SDTM_FORMS_COLLECTION}</span>
+                Source: <span className="font-mono">{MANAGE_TEMPLATES_COLLECTION}</span>
               </div>
 
               <select
                 className={`${input} mt-3`}
                 value={selectedFormCode}
-                onChange={(e) => loadSelectedTemplate(e.target.value, true)}
+                onChange={(e) => onSelectFormCode(e.target.value)}
                 disabled={!canUse}
               >
                 {formCodes.length === 0 ? <option value="">(없음)</option> : null}
@@ -860,14 +662,13 @@ export default function ManageStructurePage() {
               </select>
 
               <div className={`mt-2 text-xs ${subText}`}>
-                템플릿 저장 위치:{" "}
+                문서:{" "}
                 <span className="font-mono">
                   {MANAGE_TEMPLATES_COLLECTION}/{selectedFormCode || "-"}
                 </span>
               </div>
             </div>
 
-            {/* Form Name */}
             <div className="md:col-span-2">
               <div className="flex items-center justify-between">
                 <div className="text-sm font-semibold">Form Name (optional)</div>
@@ -887,13 +688,12 @@ export default function ManageStructurePage() {
             </div>
           </div>
 
-          {/* Items Table */}
           <div className="mt-6">
             <div className="flex items-center justify-between">
               <div>
-                <div className="text-sm font-semibold">Template Items</div>
+                <div className="text-sm font-semibold">Reference Contents (Template Items)</div>
                 <div className={`mt-1 text-xs ${subText}`}>
-                  ※ 이 항목들이 eContents “CRF 가져오기”의 자동 생성 소스가 됩니다.
+                  ※ 엑셀 업로드 후 여기 표에 즉시 반영되어야 정상입니다.
                 </div>
               </div>
               <button onClick={addItem} disabled={!canUse} className={`${btnBase} ${btnOutline}`}>
@@ -924,7 +724,7 @@ export default function ManageStructurePage() {
                   {items.length === 0 ? (
                     <tr>
                       <td colSpan={4} className={`px-3 py-10 text-center text-sm ${subText}`}>
-                        저장된 항목이 없습니다. <span className="font-semibold">+ 행 추가</span>로 템플릿을 구성하세요.
+                        참고용 컨텐츠가 없습니다. 엑셀 업로드 또는 +행 추가 후 저장하세요.
                       </td>
                     </tr>
                   ) : (
@@ -935,7 +735,6 @@ export default function ManageStructurePage() {
                             className={input}
                             value={it.contentName}
                             onChange={(e) => updateItem(it.id, { contentName: e.target.value })}
-                            placeholder="예: 이상반응명"
                             disabled={!canUse}
                           />
                         </td>
@@ -944,7 +743,6 @@ export default function ManageStructurePage() {
                             className={input}
                             value={it.contentCode}
                             onChange={(e) => updateItem(it.id, { contentCode: e.target.value })}
-                            placeholder="예: AETERM"
                             disabled={!canUse}
                           />
                         </td>
@@ -953,7 +751,6 @@ export default function ManageStructurePage() {
                             className={input}
                             value={it.note}
                             onChange={(e) => updateItem(it.id, { note: e.target.value })}
-                            placeholder="예: AE.AETERM"
                             disabled={!canUse}
                           />
                         </td>
@@ -963,7 +760,6 @@ export default function ManageStructurePage() {
                               className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                               onClick={() => moveItem(it.id, "up")}
                               disabled={!canUse || idx === 0}
-                              title="위로"
                               type="button"
                             >
                               ↑
@@ -972,7 +768,6 @@ export default function ManageStructurePage() {
                               className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                               onClick={() => moveItem(it.id, "down")}
                               disabled={!canUse || idx === items.length - 1}
-                              title="아래로"
                               type="button"
                             >
                               ↓
@@ -981,7 +776,6 @@ export default function ManageStructurePage() {
                               className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                               onClick={() => removeItem(it.id)}
                               disabled={!canUse}
-                              title="삭제"
                               type="button"
                             >
                               삭제
@@ -996,8 +790,7 @@ export default function ManageStructurePage() {
             </div>
 
             <div className={`mt-3 text-xs ${subText}`}>
-              ※ 엑셀 업로드/다운로드 스펙: <span className="font-mono">templates</span> 시트에
-              <span className="font-mono"> formCode, formName, contentName, contentCode, note</span> 컬럼을 사용합니다.
+              엑셀 컬럼: <span className="font-mono">formCode, formName, contentName, contentCode, note</span> (templates 시트)
             </div>
           </div>
         </section>
