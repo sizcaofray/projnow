@@ -3,25 +3,13 @@
 /**
  * components/ContentsMenuLinks.tsx
  *
- * ✅ 목표(이번 수정)
- * - 메뉴관리에서 adminOnly=true로 설정한 "동적 기능 메뉴"가
- *   관리자 로그인 시 정상적으로 활성화되도록 수정
+ * ✅ 이번 수정(핵심)
+ * - 최상위 메뉴(카테고리) adminOnly=true 인 경우:
+ *   비로그인/비관리자에게 해당 카테고리 + 모든 하위 메뉴를 "숨김" 처리
  *
- * ✅ 원인
- * - layout.tsx에서 <ContentsMenuLinks /> 호출 시 isAdmin props를 넘기지 않아
- *   기존 코드의 isAdmin=Boolean(props?.isAdmin)가 항상 false가 됨
- *
- * ✅ 해결
- * - props.isAdmin이 주어지면 그것을 사용
- * - props가 없으면 Firebase Auth + Firestore(users/{uid}.role)로 내부에서 isAdmin 계산
- *
- * ✅ 기존 유지
- * - 최상위 카테고리(parentId === null)는 비활성화 대상 아님(항상 활성)
- * - 최상위 제외 하위 카테고리(parentId !== null) 중,
- *   하위에 메뉴가 "아예 없는" 카테고리(children 0개)는 비활성 표시 + 무반응
- * - 비활성화는 기능 메뉴(hasPage=true)에는 그대로 적용(isActive/adminOnly)
- * - 좌측: 카테고리 트리, 우측(옆) 패널: 오버된 카테고리의 직계 기능 메뉴 표시
- * - 메뉴 오버 패널이 메인 영역(표)에 가려지는 문제 방지(z-index 유지)
+ * ✅ 기존 문제
+ * - canUseLeafPage()가 hasPage(true)인 기능 메뉴에만 adminOnly를 적용함
+ * - 카테고리(hasPage=false)는 adminOnly여도 렌더링되어 비로그인에서도 보임
  */
 
 import Link from "next/link";
@@ -83,9 +71,10 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const closeTimerRef = useRef<number | null>(null);
 
+  const isCategory = (m: MenuDoc) => !m.hasPage;
+
   // ✅ 관리자 판별(Props 미제공일 때만 동작)
   useEffect(() => {
-    // props로 이미 관리자를 받는다면 내부 판별 불필요
     if (propIsAdmin !== null) return;
 
     if (!auth || !db) {
@@ -93,7 +82,6 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
       return;
     }
 
-    // ✅ 로그인 상태 변경 감지 → users/{uid}.role 확인
     const unsub = onAuthStateChanged(auth, async (user) => {
       try {
         if (!user) {
@@ -149,20 +137,6 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
         });
 
         setMenus(rows);
-
-        // ✅ 최초 1회만: 최상위 카테고리 기본 펼침
-        setExpanded((prev) => {
-          if (Object.keys(prev).length > 0) return prev;
-
-          const next: Record<string, boolean> = {};
-          rows
-            .filter((m) => !m.hasPage)
-            .forEach((m) => {
-              if (m.parentId === null) next[m.id] = true;
-            });
-
-          return next;
-        });
       },
       () => {
         // 구독 실패 시 앱 중단 방지
@@ -171,16 +145,6 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
 
     return () => unsub();
   }, [db]);
-
-  const isCategory = (m: MenuDoc) => !m.hasPage;
-
-  /** ✅ 기능 메뉴(페이지)의 사용 가능 여부 (비활성화는 기능에만 적용) */
-  const canUseLeafPage = (m: MenuDoc) => {
-    if (!m.hasPage) return true;
-    if (!m.isActive) return false;
-    if (m.adminOnly && !isAdmin) return false;
-    return true;
-  };
 
   /** ✅ parentId -> children */
   const childrenByParent = useMemo(() => {
@@ -194,24 +158,77 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
     return map;
   }, [menus]);
 
+  /**
+   * ✅ adminOnly 상속 숨김 계산
+   * - adminOnly=true 인 메뉴는 (카테고리/페이지 모두) 비관리자에게 숨김
+   * - 숨겨진 카테고리의 모든 하위도 숨김(상속)
+   */
+  const hiddenIds = useMemo(() => {
+    const hidden = new Set<string>();
+
+    const walk = (parentId: string | null, inheritedHidden: boolean) => {
+      const kids = childrenByParent.get(parentId) ?? [];
+      for (const m of kids) {
+        const selfHidden = inheritedHidden || (m.adminOnly && !isAdmin);
+        if (selfHidden) hidden.add(m.id);
+        walk(m.id, selfHidden);
+      }
+    };
+
+    walk(null, false);
+    return hidden;
+  }, [childrenByParent, isAdmin]);
+
+  /** ✅ 보이는 메뉴인지 */
+  const canSeeMenu = (m: MenuDoc) => !hiddenIds.has(m.id);
+
+  /** ✅ 기능 메뉴(페이지)의 사용 가능 여부 */
+  const canUseLeafPage = (m: MenuDoc) => {
+    // 숨김이면 사용 불가 (링크 자체도 렌더링하지 않도록 밖에서 필터링도 함)
+    if (!canSeeMenu(m)) return false;
+    if (!m.hasPage) return true;
+    if (!m.isActive) return false;
+    // adminOnly는 hiddenIds에서 1차 차단되지만 안전하게 한 번 더
+    if (m.adminOnly && !isAdmin) return false;
+    return true;
+  };
+
   /** ✅ "하위에 메뉴가 없는 카테고리" 판정 (children 0개) */
   const isEmptyCategory = (categoryId: string) => {
-    const kids = childrenByParent.get(categoryId) ?? [];
+    const kids = (childrenByParent.get(categoryId) ?? []).filter(canSeeMenu);
     return kids.length === 0;
   };
 
   /** ✅ 카테고리 하위 카테고리 수 */
   const categoryChildrenCount = (categoryId: string) => {
-    const kids = childrenByParent.get(categoryId) ?? [];
+    const kids = (childrenByParent.get(categoryId) ?? []).filter(canSeeMenu);
     return kids.filter(isCategory).length;
   };
 
   /** ✅ 옆 패널: 오버된 카테고리의 직계 기능 메뉴(hasPage=true) */
   const hoverLeafPages = useMemo(() => {
     if (!hoverCategoryId) return [];
-    const kids = childrenByParent.get(hoverCategoryId) ?? [];
+    const kids = (childrenByParent.get(hoverCategoryId) ?? []).filter(canSeeMenu);
     return kids.filter((m) => m.hasPage && !!m.path);
-  }, [childrenByParent, hoverCategoryId]);
+  }, [childrenByParent, hoverCategoryId, hiddenIds]);
+
+  // ✅ 최초 1회: 최상위 카테고리 기본 펼침 (보이는 것만)
+  useEffect(() => {
+    setExpanded((prev) => {
+      if (Object.keys(prev).length > 0) return prev;
+
+      const next: Record<string, boolean> = {};
+      menus
+        .filter((m) => !m.hasPage)
+        .filter(canSeeMenu)
+        .forEach((m) => {
+          if (m.parentId === null) next[m.id] = true;
+        });
+
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [menus, hiddenIds]);
 
   const computeTop = (el: HTMLElement | null) => {
     const container = containerRef.current;
@@ -251,7 +268,8 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
   };
 
   const renderCategoryTree = (parentId: string | null, depth: number) => {
-    const kids = (childrenByParent.get(parentId) ?? []).filter(isCategory);
+    // ✅ 보이는 카테고리만 렌더
+    const kids = (childrenByParent.get(parentId) ?? []).filter(isCategory).filter(canSeeMenu);
     if (kids.length === 0) return null;
 
     return (
@@ -266,9 +284,7 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
           const empty = isEmptyCategory(cat.id);
           const categoryDisabled = !isTopLevel && empty;
 
-          // ✅ 다크/라이트 모드 비의존(사이드바 자체 기준 색상 고정)
-          const baseClass =
-            "w-full flex items-center justify-between px-3 py-2 rounded text-sm text-slate-100";
+          const baseClass = "w-full flex items-center justify-between px-3 py-2 rounded text-sm text-slate-100";
           const activeClass = "hover:bg-white/10 cursor-pointer";
           const disabledClass = "opacity-50 cursor-not-allowed pointer-events-none select-none";
 
@@ -307,7 +323,6 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
   };
 
   return (
-    // ✅ z-index 유지: 메인(표)보다 위에 떠야 함
     <div ref={containerRef} className="relative z-[600]">
       {/* ✅ 좌측: 카테고리 트리 */}
       {renderCategoryTree(null, 0)}
@@ -315,7 +330,6 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
       {/* ✅ 우측(옆) 패널: 기능 메뉴 */}
       {hoverCategoryId && hoverLeafPages.length > 0 ? (
         <div
-          // ✅ 다크/라이트 비의존: 패널도 사이드바 톤에 맞춰 고정(어두운 배경 + 밝은 글씨)
           className="absolute left-full ml-2 w-56 rounded-lg border border-slate-700 bg-slate-900 text-slate-100 shadow-lg z-[700]"
           style={{ top: panelTop }}
           onMouseEnter={cancelCloseHoverPanel}
@@ -323,6 +337,7 @@ export default function ContentsMenuLinks(props?: { isAdmin?: boolean }) {
         >
           <div className="p-2 space-y-1">
             {hoverLeafPages.map((p) => {
+              // ✅ 보이는 메뉴만 들어오지만, 안전하게 usable 체크
               const usable = canUseLeafPage(p);
 
               if (!usable) {
