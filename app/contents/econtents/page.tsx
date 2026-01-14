@@ -161,7 +161,7 @@ function buildDefaultContents(formCodeRaw: string, formNameRaw: string): Array<O
       { contentName: "병력명", contentCode: "MHTERM", note: "MH.MHTERM" },
       { contentName: "시작일", contentCode: "MHSTDTC", note: "MH.MHSTDTC" },
       { contentName: "종료일", contentCode: "MHENDTC", note: "MH.MHENDTC" },
-      { contentName: "지속여부", contentCode: "MHENRF", note: "MH.MHENRF(관행)" },
+      { contentName: "지속여부(해당 시)", contentCode: "MHONGO", note: "MH.MHONGO (관행/프로토콜 기준)" },
     ],
 
     // Exposure / Dosing
