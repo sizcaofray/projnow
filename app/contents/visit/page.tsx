@@ -10,7 +10,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 // ✅ 프로젝트에 이미 존재하는 Firebase 초기화 모듈 경로로 교체하세요.
-import { auth, db } from "@/lib/firebase";
+import { getFirebaseAuth, getFirebaseDb } from "@/lib/firebase/client";
 
 // Firebase
 import {
