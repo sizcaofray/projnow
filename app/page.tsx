@@ -1,59 +1,75 @@
 // app/page.tsx
-// ✅ 창 크기 자동 대응 (크기 강제 X)
-// ✅ 불필요한 스크롤 방지 (과한 padding/고정 height 지양)
-// ✅ 다크/라이트 모드 영향 없음 (색상 고정)
+// ✅ 헤더/푸터를 제외한 "남은 영역"을 채우는 방식 (flex-1 + min-h-0)
+// ✅ 배경색 강제하지 않음 (어떤 모드/테마에서도 자연스럽게)
+// ✅ 과한 padding/고정 height 사용 금지 → 불필요 스크롤 최소화
 
 import Link from "next/link"; // Next.js Link
 
 export default function HomePage() {
   return (
-    // ✅ min-h-dvh: 뷰포트 높이를 “최소”로만 채움(강제 고정 X)
-    <main className="relative min-h-dvh w-full flex items-center justify-center px-6">
-      {/* ✅ 배경은 화면 전체 채움(콘텐츠 높이와 무관) */}
-      <div className="pointer-events-none absolute inset-0 -z-10 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800" />
-      <div className="pointer-events-none absolute inset-0 -z-10 opacity-35 [background:radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.12),transparent_38%),radial-gradient(circle_at_80%_25%,rgba(56,189,248,0.20),transparent_42%),radial-gradient(circle_at_50%_80%,rgba(168,85,247,0.18),transparent_45%)]" />
+    // ✅ 남은 영역 채우기(헤더/푸터가 있으면 자동으로 나머지)
+    <main className="flex-1 min-h-0 w-full flex items-center justify-center px-6 py-8">
+      {/* ✅ 내용은 카드 중심으로(배경 강제 없음) */}
+      <section className="w-full max-w-3xl">
+        {/* 상단 타이틀/메시지 */}
+        <div className="text-center">
+          <h1 className="text-4xl font-bold tracking-tight">
+            ProjNow
+          </h1>
 
-      {/* ✅ 콘텐츠: 높이/크기 강제 없이 자연스럽게 */}
-      <div className="mx-auto w-full max-w-xl text-center">
-        <h1 className="text-4xl font-bold tracking-tight text-white">ProjNow</h1>
+          <p className="mt-4 text-base leading-relaxed opacity-80">
+            ProjNow는 임상 시험에서 <span className="font-semibold">Data Management</span> 영역의
+            업무 절차를 <span className="font-semibold">설계·관리</span>하여,
+            더 <span className="font-semibold">효율적</span>이고 <span className="font-semibold">정확한</span> 업무 수행을 지원하는 서비스입니다.
+          </p>
+        </div>
 
-        <p className="mt-5 text-base leading-relaxed text-white/80">
-          ProjNow는 임상 시험에서{" "}
-          <span className="font-semibold text-white">Data Management</span> 영역의
-          업무 절차를 <span className="font-semibold text-white">설계·관리</span>하여,
-          더 <span className="font-semibold text-white">효율적</span>이고{" "}
-          <span className="font-semibold text-white">정확한</span> 업무 수행을 지원하는 서비스입니다.
-        </p>
-
-        {/* ✅ 카드: 높이 늘리지 않게 컴팩트하게 */}
-        <div className="mt-7 grid gap-3 sm:grid-cols-3 text-left">
-          <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-            <div className="text-sm font-semibold text-white">절차 설계</div>
-            <div className="mt-1 text-xs text-white/70">SOP/Workflow 기반 구조화</div>
+        {/* 핵심 카드 */}
+        <div className="mt-8 grid gap-4 md:grid-cols-3">
+          <div className="rounded-2xl border p-5">
+            <div className="text-sm font-semibold">절차 설계</div>
+            <div className="mt-2 text-sm opacity-80">
+              SOP/Workflow 기반으로 업무 단계를 구조화합니다.
+            </div>
           </div>
-          <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-            <div className="text-sm font-semibold text-white">정확성</div>
-            <div className="mt-1 text-xs text-white/70">정합성·검증 중심 품질</div>
+
+          <div className="rounded-2xl border p-5">
+            <div className="text-sm font-semibold">정확성</div>
+            <div className="mt-2 text-sm opacity-80">
+              정합성·검증 중심으로 오류를 줄이고 품질을 안정화합니다.
+            </div>
           </div>
-          <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-            <div className="text-sm font-semibold text-white">추적성</div>
-            <div className="mt-1 text-xs text-white/70">변경 이력·근거 관리</div>
+
+          <div className="rounded-2xl border p-5">
+            <div className="text-sm font-semibold">추적성</div>
+            <div className="mt-2 text-sm opacity-80">
+              변경 이력·근거를 남겨 투명한 관리가 가능합니다.
+            </div>
           </div>
         </div>
 
-        <div className="mt-8">
+        {/* CTA */}
+        <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
           <Link
             href="/contents"
-            className="inline-flex items-center justify-center rounded-lg bg-white px-6 py-3 text-sm font-semibold text-slate-900 hover:bg-white/90"
+            className="inline-flex items-center justify-center rounded-lg border px-6 py-3 text-sm font-semibold hover:opacity-90"
           >
             시작하기
           </Link>
+
+          <Link
+            href="/contents/datainfo"
+            className="inline-flex items-center justify-center rounded-lg px-6 py-3 text-sm font-semibold opacity-80 hover:opacity-100"
+          >
+            기능 둘러보기
+          </Link>
         </div>
 
-        <div className="mt-4 text-xs text-white/60">
-          Define → Execute → Control 흐름으로 DM 업무를 일관되게 관리합니다.
+        {/* 보조 문구 */}
+        <div className="mt-5 text-center text-xs opacity-70">
+          Define → Execute → Control 흐름으로 Data Management 업무를 일관되게 관리합니다.
         </div>
-      </div>
+      </section>
     </main>
   );
 }
