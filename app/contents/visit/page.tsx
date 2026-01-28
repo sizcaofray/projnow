@@ -2,137 +2,170 @@
 
 /**
  * 📄 app/contents/visit/page.tsx
- * - Visit(Stage) 테이블 관리 페이지
- * - 최초 기본행: "서면동의", "스크리닝" 2개만 생성
- * - 나머지는 "행 추가" 버튼으로 입력
- * - Excel 다운로드 / 업로드 지원
- * - Firestore에 사용자(uid)별 저장
- *
- * ⚠️ 주의:
- * - Firebase 초기화 파일 경로는 프로젝트마다 다를 수 있습니다.
- *   아래 import 경로(@/lib/firebase)는 프로젝트에 맞게 수정하세요.
+ * - econtents 페이지의 Firebase 패턴을 그대로 따름:
+ *   import { getFirebaseAuth, getFirebaseDb } from "@/lib/firebase/client";
+ * - 저장 위치(권장): /visit/{uid}
+ * - 최초 기본행: 서면동의(100), 스크리닝(110) 2개만 생성
+ * - 나머지는 행 추가로 입력
+ * - Excel 다운로드/업로드(xlsx)
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-// ✅ 프로젝트에 맞게 경로 수정 필요
-import { auth, db } from "@/lib/firebase";
-
-import { onAuthStateChanged, User } from "firebase/auth";
-import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import { onAuthStateChanged } from "firebase/auth";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { getFirebaseAuth, getFirebaseDb } from "@/lib/firebase/client";
+import * as XLSX from "xlsx";
 
 type VisitRow = {
-  no: number; // 표시용 번호(자동)
-  visit: string; // Visit 명
-  stage: number; // Stage 코드
+  id: string; // 안정적인 key (엑셀 업/다운에도 사용 가능)
+  no: number; // 화면 표시용(자동 1..n)
+  visit: string;
+  stage: number;
 };
 
-type VisitDoc = {
-  rows: VisitRow[];
-  updatedAt?: unknown;
-};
+const VISIT_COL = "visit"; // ✅ Firestore: /visit/{uid}
 
-// ✅ 요구사항 반영: 기본값은 2개만 생성
+function toStr(v: any) {
+  return String(v ?? "").trim();
+}
+
+function newId(prefix = "v") {
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+// ✅ 요구사항: 기본 2행만 생성
 const DEFAULT_ROWS: VisitRow[] = [
-  { no: 1, visit: "서면동의", stage: 100 },
-  { no: 2, visit: "스크리닝", stage: 110 },
+  { id: newId("v"), no: 1, visit: "서면동의", stage: 100 },
+  { id: newId("v"), no: 2, visit: "스크리닝", stage: 110 },
 ];
 
 export default function VisitPage() {
   const router = useRouter();
 
-  // ✅ 로그인 사용자
-  const [user, setUser] = useState<User | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  // ✅ econtents와 동일 패턴: try/catch로 안전 초기화
+  const auth = useMemo(() => {
+    try {
+      return getFirebaseAuth();
+    } catch {
+      return null;
+    }
+  }, []);
 
-  // ✅ 데이터
+  const db = useMemo(() => {
+    try {
+      return getFirebaseDb();
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const [uid, setUid] = useState("");
+  const [loadingUser, setLoadingUser] = useState(true);
+
   const [rows, setRows] = useState<VisitRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
 
-  // ✅ 메시지
-  const [message, setMessage] = useState<string>("");
+  const [errorMsg, setErrorMsg] = useState("");
+  const [infoMsg, setInfoMsg] = useState("");
 
-  // ✅ 업로드 input ref
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // ✅ Firestore 문서 경로 (사용자별)
-  const docRef = useMemo(() => {
-    if (!user?.uid) return null;
-    // users/{uid}/configs/visit
-    return doc(db, "users", user.uid, "configs", "visit");
-  }, [user?.uid]);
-
   // ------------------------------------------------------------
-  // 1) Auth 상태 구독
+  // 1) 로그인 사용자 식별 (econtents 동일)
   // ------------------------------------------------------------
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setUser(u ?? null);
-      setAuthLoading(false);
+    if (!auth) {
+      setErrorMsg("Firebase Auth 초기화 실패");
+      setLoadingUser(false);
+      return;
+    }
 
-      // ✅ 비로그인 시 '/'로 리디렉트
-      if (!u) router.replace("/");
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setUid(user?.uid ?? "");
+      setLoadingUser(false);
     });
 
     return () => unsub();
-  }, [router]);
+  }, [auth]);
+
+  // ✅ 요구사항: 비로그인/로그아웃 시 '/' 리디렉트
+  useEffect(() => {
+    if (loadingUser) return;
+    if (!uid) router.replace("/");
+  }, [loadingUser, uid, router]);
 
   // ------------------------------------------------------------
-  // 유틸: No 재정렬 및 타입 정리
+  // 유틸: no 1..n 자동 재부여 + 타입 정리
   // ------------------------------------------------------------
   function normalizeRows(input: VisitRow[]): VisitRow[] {
     const cleaned = (input ?? [])
-      .map((r, idx) => {
-        const stageNum = Number((r as any)?.stage);
+      .map((r: any, idx: number) => {
+        const stageNum = Number(r?.stage);
         return {
-          // ✅ no는 항상 화면상 1..n 자동 부여
+          id: toStr(r?.id) || newId("v"),
           no: idx + 1,
-          visit: String((r as any)?.visit ?? ""),
+          visit: toStr(r?.visit),
           stage: Number.isFinite(stageNum) ? stageNum : 0,
-        };
+        } as VisitRow;
       })
+      // (선택) 완전 빈 행도 허용할지 여부: 현재는 허용(visit/stage 비어도 유지)
       .filter((r) => r.no > 0);
 
     return cleaned.map((r, i) => ({ ...r, no: i + 1 }));
   }
 
   // ------------------------------------------------------------
-  // 2) 초기 로드: Firestore에서 rows 읽기 (없으면 기본 2행 생성)
+  // 2) 페이지 진입 시: /visit/{uid} 로드 (없으면 기본 2행 생성 후 저장)
   // ------------------------------------------------------------
   useEffect(() => {
     const run = async () => {
-      if (authLoading) return;
-      if (!docRef) return;
+      setErrorMsg("");
+      setInfoMsg("");
 
+      if (!db) return;
+      if (!uid) return;
+
+      setLoading(true);
       try {
-        setLoading(true);
-        setMessage("");
-
-        const snap = await getDoc(docRef);
+        const ref = doc(db, VISIT_COL, uid);
+        const snap = await getDoc(ref);
 
         if (!snap.exists()) {
-          // ✅ 최초 진입: 기본 2행만 생성
-          const payload: VisitDoc = {
-            rows: normalizeRows(DEFAULT_ROWS),
-            updatedAt: serverTimestamp(),
-          };
-          await setDoc(docRef, payload, { merge: true });
-          setRows(payload.rows);
+          const initRows = normalizeRows(DEFAULT_ROWS);
+
+          await setDoc(
+            ref,
+            {
+              rows: initRows,
+              updatedAt: Date.now(),
+              source: "init_default_2rows",
+            },
+            { merge: false }
+          );
+
+          setRows(initRows);
+          setInfoMsg("기본 방문(서면동의/스크리닝) 2개를 생성했습니다.");
           return;
         }
 
-        const data = snap.data() as VisitDoc;
-        const loadedRows =
-          Array.isArray(data?.rows) && data.rows.length > 0
-            ? normalizeRows(data.rows)
-            : normalizeRows(DEFAULT_ROWS);
+        const data = snap.data() as any;
+        const loadedRows: VisitRow[] = Array.isArray(data?.rows)
+          ? normalizeRows(
+              data.rows.map((r: any) => ({
+                id: toStr(r?.id) || newId("v"),
+                no: Number(r?.no ?? 0),
+                visit: toStr(r?.visit),
+                stage: Number(r?.stage ?? 0),
+              }))
+            )
+          : [];
 
-        setRows(loadedRows);
-      } catch (e) {
-        console.error(e);
-        setMessage("데이터 로드 중 오류가 발생했습니다.");
+        // ✅ 저장 데이터가 비어있으면 기본 2행으로 복구(화면만)
+        setRows(loadedRows.length ? loadedRows : normalizeRows(DEFAULT_ROWS));
+      } catch (e: any) {
+        setErrorMsg(e?.message ?? "Visit 불러오기 실패");
         setRows(normalizeRows(DEFAULT_ROWS));
       } finally {
         setLoading(false);
@@ -140,144 +173,146 @@ export default function VisitPage() {
     };
 
     void run();
-  }, [authLoading, docRef]);
+  }, [db, uid]);
 
   // ------------------------------------------------------------
   // 저장
   // ------------------------------------------------------------
-  const handleSave = async () => {
-    if (!docRef) return;
+  const onSave = async () => {
+    setErrorMsg("");
+    setInfoMsg("");
 
+    if (!db) return setErrorMsg("Firestore 초기화 실패");
+    if (!uid) return setErrorMsg("로그인이 필요합니다.");
+
+    setLoading(true);
     try {
-      setSaving(true);
-      setMessage("");
-
-      const payload: VisitDoc = {
+      const ref = doc(db, VISIT_COL, uid);
+      const payload = {
         rows: normalizeRows(rows),
-        updatedAt: serverTimestamp(),
+        updatedAt: Date.now(),
+        source: "manual_edit",
       };
 
-      await setDoc(docRef, payload, { merge: true });
+      await setDoc(ref, payload, { merge: false });
       setRows(payload.rows);
-      setMessage("저장되었습니다.");
-    } catch (e) {
-      console.error(e);
-      setMessage("저장 중 오류가 발생했습니다.");
+      setInfoMsg("Visit가 저장되었습니다.");
+    } catch (e: any) {
+      setErrorMsg(e?.message ?? "저장 실패");
     } finally {
-      setSaving(false);
+      setLoading(false);
     }
   };
 
   // ------------------------------------------------------------
   // 행 추가/삭제
   // ------------------------------------------------------------
-  const handleAddRow = () => {
-    setRows((prev) => normalizeRows([...prev, { no: prev.length + 1, visit: "", stage: 0 }]));
+  const onAddRow = () => {
+    setRows((prev) => normalizeRows([...prev, { id: newId("v"), no: prev.length + 1, visit: "", stage: 0 }]));
   };
 
-  const handleDeleteRow = (no: number) => {
-    setRows((prev) => normalizeRows(prev.filter((r) => r.no !== no)));
+  const onDeleteRow = (id: string) => {
+    setRows((prev) => normalizeRows(prev.filter((r) => r.id !== id)));
   };
 
   // ------------------------------------------------------------
   // 셀 편집
   // ------------------------------------------------------------
-  const handleChangeVisit = (no: number, value: string) => {
-    setRows((prev) => prev.map((r) => (r.no === no ? { ...r, visit: value } : r)));
+  const onChangeVisit = (id: string, value: string) => {
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, visit: value } : r)));
   };
 
-  const handleChangeStage = (no: number, value: string) => {
+  const onChangeStage = (id: string, value: string) => {
     const n = Number(value);
     setRows((prev) =>
-      prev.map((r) =>
-        r.no === no ? { ...r, stage: Number.isFinite(n) ? n : 0 } : r
-      )
+      prev.map((r) => (r.id === id ? { ...r, stage: Number.isFinite(n) ? n : 0 } : r))
     );
   };
 
   // ------------------------------------------------------------
   // Excel 다운로드
+  // - 컬럼: No., Visit, Stage (요청 이미지와 동일)
   // ------------------------------------------------------------
-  const handleDownloadExcel = async () => {
+  const onDownloadExcel = () => {
+    setErrorMsg("");
+    setInfoMsg("");
+
+    const data = normalizeRows(rows);
+    if (!data.length) {
+      setInfoMsg("다운로드할 데이터가 없습니다.");
+      return;
+    }
+
     try {
-      setMessage("");
+      const aoa: any[][] = [];
+      aoa.push(["No.", "Visit", "Stage"]);
 
-      // ✅ xlsx 필요: npm i xlsx
-      const XLSX = await import("xlsx");
+      for (const r of data) {
+        aoa.push([r.no, r.visit, r.stage]);
+      }
 
-      // ✅ 엑셀 컬럼명: No., Visit, Stage
-      const exportRows = normalizeRows(rows).map((r) => ({
-        "No.": r.no,
-        "Visit": r.visit,
-        "Stage": r.stage,
-      }));
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws["!cols"] = [{ wch: 6 }, { wch: 28 }, { wch: 10 }];
 
-      const ws = XLSX.utils.json_to_sheet(exportRows);
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Visit");
 
-      XLSX.writeFile(wb, "visit_table.xlsx");
-      setMessage("Excel 다운로드가 완료되었습니다.");
-    } catch (e) {
-      console.error(e);
-      setMessage("Excel 다운로드 중 오류가 발생했습니다. (xlsx 설치 여부 확인)");
+      XLSX.writeFile(wb, `visit_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      setInfoMsg("엑셀 파일을 다운로드했습니다.");
+    } catch (e: any) {
+      setErrorMsg(e?.message ?? "엑셀 다운로드 실패");
     }
   };
 
   // ------------------------------------------------------------
-  // Excel 업로드 (업로드 시 화면 데이터 교체)
-  // - 업로드 즉시 저장하지 않고 "저장" 버튼으로 확정
+  // Excel 업로드
+  // - 업로드 시 화면 데이터를 교체(덮어쓰기)
+  // - 저장 확정은 '저장' 버튼으로
   // ------------------------------------------------------------
-  const handleClickUpload = () => {
-    fileInputRef.current?.click();
-  };
+  const onClickUpload = () => fileInputRef.current?.click();
 
-  const handleUploadFile = async (file: File) => {
+  const onUploadFile = async (file: File) => {
+    setErrorMsg("");
+    setInfoMsg("");
+
     try {
-      setMessage("");
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
 
-      const XLSX = await import("xlsx");
-      const buffer = await file.arrayBuffer();
-      const wb = XLSX.read(buffer, { type: "array" });
-
-      // ✅ 첫 시트 사용
       const sheetName = wb.SheetNames[0];
       const ws = wb.Sheets[sheetName];
 
-      // ✅ 헤더 기반 파싱
+      // 헤더 기반 json
       const json = XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: "" });
 
-      // ✅ 다양한 헤더 케이스 허용 (No., No, no 등)
       const parsed: VisitRow[] = json.map((r, idx) => {
-        const noRaw = r["No."] ?? r["No"] ?? r["no"] ?? r["NO"] ?? (idx + 1);
+        const noRaw = r["No."] ?? r["No"] ?? r["no"] ?? r["NO"] ?? idx + 1;
         const visitRaw = r["Visit"] ?? r["visit"] ?? r["VISIT"] ?? "";
         const stageRaw = r["Stage"] ?? r["stage"] ?? r["STAGE"] ?? 0;
 
         const stageNum = Number(stageRaw);
 
         return {
+          id: newId("v"),
           no: Number(noRaw) || idx + 1,
-          visit: String(visitRaw ?? ""),
+          visit: toStr(visitRaw),
           stage: Number.isFinite(stageNum) ? stageNum : 0,
         };
       });
 
       const next = normalizeRows(parsed);
 
-      // ✅ 업로드 파일이 비어있다면 기본 2행으로 복구
-      setRows(next.length > 0 ? next : normalizeRows(DEFAULT_ROWS));
-
-      setMessage("업로드 완료: 화면에 반영되었습니다. 저장 버튼을 눌러 확정하세요.");
-    } catch (e) {
-      console.error(e);
-      setMessage("Excel 업로드 중 오류가 발생했습니다. 파일 형식/헤더를 확인하세요.");
+      // 업로드가 비었으면 기본 2행으로 복구
+      setRows(next.length ? next : normalizeRows(DEFAULT_ROWS));
+      setInfoMsg("업로드 완료: 화면에 반영되었습니다. 저장 버튼으로 확정하세요.");
+    } catch (e: any) {
+      setErrorMsg(e?.message ?? "엑셀 업로드 실패 (파일/헤더 확인)");
     }
   };
 
-  // ------------------------------------------------------------
-  // 렌더링
-  // ------------------------------------------------------------
-  if (authLoading || loading) {
+  const canUseButtons = !loading && !loadingUser;
+
+  if (loadingUser) {
     return (
       <main className="p-6">
         <div className="text-sm opacity-70">로딩 중...</div>
@@ -287,53 +322,53 @@ export default function VisitPage() {
 
   return (
     <main className="p-6 space-y-4">
-      {/* 타이틀 */}
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-xl font-semibold">Visit 관리</h1>
           <p className="text-sm opacity-70 mt-1">
-            기본으로 “서면동의/스크리닝” 2개만 생성되며, 나머지는 행 추가로 입력합니다. (업로드 시 화면 데이터는 교체됩니다)
+            기본으로 “서면동의/스크리닝” 2개만 생성되며, 나머지는 행 추가로 입력합니다. (업로드는 화면 데이터를 교체합니다)
           </p>
         </div>
 
-        {/* 액션 버튼 */}
         <div className="flex gap-2 flex-wrap">
           <button
-            onClick={handleDownloadExcel}
-            className="px-3 py-2 rounded border text-sm hover:opacity-90"
+            onClick={onDownloadExcel}
+            disabled={!canUseButtons}
+            className="px-3 py-2 rounded border text-sm hover:opacity-90 disabled:opacity-50"
             type="button"
           >
             Excel 다운로드
           </button>
 
           <button
-            onClick={handleClickUpload}
-            className="px-3 py-2 rounded border text-sm hover:opacity-90"
+            onClick={onClickUpload}
+            disabled={!canUseButtons}
+            className="px-3 py-2 rounded border text-sm hover:opacity-90 disabled:opacity-50"
             type="button"
           >
             Excel 업로드
           </button>
 
           <button
-            onClick={handleAddRow}
-            className="px-3 py-2 rounded border text-sm hover:opacity-90"
+            onClick={onAddRow}
+            disabled={!canUseButtons}
+            className="px-3 py-2 rounded border text-sm hover:opacity-90 disabled:opacity-50"
             type="button"
           >
             행 추가
           </button>
 
           <button
-            onClick={handleSave}
-            disabled={saving}
+            onClick={onSave}
+            disabled={!canUseButtons}
             className="px-3 py-2 rounded border text-sm hover:opacity-90 disabled:opacity-50"
             type="button"
           >
-            {saving ? "저장 중..." : "저장"}
+            저장
           </button>
         </div>
       </div>
 
-      {/* 업로드 input (숨김) */}
       <input
         ref={fileInputRef}
         type="file"
@@ -342,20 +377,24 @@ export default function VisitPage() {
         onChange={(e) => {
           const f = e.target.files?.[0];
           if (!f) return;
+          void onUploadFile(f);
 
-          void handleUploadFile(f);
-
-          // ✅ 같은 파일 재업로드 가능하도록 value 초기화
+          // 같은 파일 재업로드 가능하도록 초기화
           e.currentTarget.value = "";
         }}
       />
 
-      {/* 메시지 */}
-      {message ? (
-        <div className="text-sm px-3 py-2 rounded border">{message}</div>
+      {errorMsg ? (
+        <div className="text-sm px-3 py-2 rounded border border-rose-300 bg-rose-50 text-rose-700">
+          {errorMsg}
+        </div>
+      ) : null}
+      {infoMsg ? (
+        <div className="text-sm px-3 py-2 rounded border border-emerald-300 bg-emerald-50 text-emerald-700">
+          {infoMsg}
+        </div>
       ) : null}
 
-      {/* 테이블 */}
       <div className="border rounded overflow-auto">
         <table className="min-w-[720px] w-full text-sm">
           <thead className="border-b">
@@ -369,13 +408,13 @@ export default function VisitPage() {
 
           <tbody>
             {rows.map((r) => (
-              <tr key={r.no} className="border-b last:border-b-0">
+              <tr key={r.id} className="border-b last:border-b-0">
                 <td className="p-2 align-middle">{r.no}</td>
 
                 <td className="p-2">
                   <input
                     value={r.visit}
-                    onChange={(e) => handleChangeVisit(r.no, e.target.value)}
+                    onChange={(e) => onChangeVisit(r.id, e.target.value)}
                     className="w-full px-2 py-1 rounded border bg-transparent"
                     placeholder="예) 서면동의, 스크리닝..."
                   />
@@ -384,7 +423,7 @@ export default function VisitPage() {
                 <td className="p-2">
                   <input
                     value={String(r.stage)}
-                    onChange={(e) => handleChangeStage(r.no, e.target.value)}
+                    onChange={(e) => onChangeStage(r.id, e.target.value)}
                     className="w-full px-2 py-1 rounded border bg-transparent"
                     inputMode="numeric"
                     placeholder="예) 100"
@@ -393,7 +432,7 @@ export default function VisitPage() {
 
                 <td className="p-2">
                   <button
-                    onClick={() => handleDeleteRow(r.no)}
+                    onClick={() => onDeleteRow(r.id)}
                     className="px-2 py-1 rounded border text-xs hover:opacity-90"
                     type="button"
                   >
