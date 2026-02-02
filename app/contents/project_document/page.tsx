@@ -1,29 +1,31 @@
 "use client";
 
 /**
- * projnow/app/contents/project_document/page.tsx
+ * app/contents/project_document/page.tsx
  *
- * ✅ 이번 수정(중요): 불필요한 중복 렌더링 제거
- * - 기존 문제: 자식 카테고리 리스트에서 이미 1번 렌더링한 c를 renderNode(c)로 또 렌더링해서
- *   "같은 카테고리/입력창/버튼"이 2번 표시됨(스크린샷 현상).
- * - 해결: renderNode에 options.hideHeader를 추가하여,
- *   "리스트에서 이미 헤더(카테고리명/저장/삭제/하위카테고리생성)를 렌더링한 경우"
- *   재귀 호출에서는 헤더를 숨기고(= 중복 제거),
- *   파일관리/하위 카테고리 트리만 렌더링하도록 변경.
+ * ✅ 이번 수정 핵심
+ * 1) "같은 카테고리 2번 렌더" 현상 제거
+ *    - 카테고리(노드)는 각 레벨에서 1번만 렌더링하도록 재귀 구조 정리
  *
- * ✅ 기존 기능 유지
- * - 카테고리명 인라인 수정/저장
- * - 파일 등록/수정 모달
- * - 드래그&드롭 정렬(카테고리/파일)
- * - select 다크/라이트 가독성 유지
+ * 2) 누락된 핵심 로직 복구(현재 화면에서 "프로젝트 노드를 불러오지 못했습니다" 뜨는 원인)
+ *    - loadProjectAll / ensureProjectScaffold / CRUD / 파일 업로드/삭제 / 순서 저장 구현 포함
  *
- * ⚠️ Firebase env 필요:
- * NEXT_PUBLIC_FIREBASE_API_KEY
- * NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
- * NEXT_PUBLIC_FIREBASE_PROJECT_ID
- * NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
- * NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
- * NEXT_PUBLIC_FIREBASE_APP_ID
+ * ✅ 기존 UI/마크업 최대 유지
+ * - 상단 프로젝트 선택/생성 섹션 유지
+ * - 카테고리 인라인 편집/저장/삭제 유지
+ * - 파일 등록/수정 모달 유지
+ * - DnD로 카테고리/파일 order 저장 유지
+ *
+ * ⚠️ 사용 컬렉션(Firestore)
+ * - project_documents
+ * - project_document_nodes
+ * - project_document_files
+ * - project_document_mods
+ * - project_document_audit
+ *
+ * ⚠️ Storage 경로
+ * - project_documents/{projectId}/files/{fileId}/{filename}
+ * - project_documents/{projectId}/mods/{fileId}/{modId}.md
  */
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -44,6 +46,7 @@ import {
   serverTimestamp,
   limit,
   writeBatch,
+  orderBy,
   type Firestore,
 } from "firebase/firestore";
 import {
@@ -163,8 +166,6 @@ type AuditAction =
 
 /** -----------------------------
  * Sortable Row Components
- * - 드래그 핸들 포함
- * - 충돌 방지 위해 id는 prefix 사용
  * ------------------------------ */
 function SortableCategoryRow(props: {
   dndId: string; // "node:xxx"
@@ -187,7 +188,7 @@ function SortableCategoryRow(props: {
 
   return (
     <div ref={setNodeRef} style={style} className="flex items-center gap-2">
-      {/* ✅ 드래그 핸들 (여기 잡고 이동) */}
+      {/* ✅ 드래그 핸들 */}
       <button
         type="button"
         className="px-2 py-1 rounded border text-xs cursor-grab active:cursor-grabbing"
@@ -201,7 +202,6 @@ function SortableCategoryRow(props: {
 
       <span className="text-sm font-semibold">📁</span>
 
-      {/* ✅ 카테고리명 수정 */}
       <input
         className="border rounded px-2 py-1 text-sm bg-transparent w-[260px]"
         value={props.nameValue}
@@ -311,7 +311,12 @@ function SortableFileRow(props: {
                     </a>
                   ) : null}
                 </div>
-                <button type="button" className="px-2 py-1 rounded border" onClick={() => props.onDeleteMod(m.id)} disabled={props.loading}>
+                <button
+                  type="button"
+                  className="px-2 py-1 rounded border"
+                  onClick={() => props.onDeleteMod(m.id)}
+                  disabled={props.loading}
+                >
                   문서 삭제
                 </button>
               </div>
@@ -328,7 +333,6 @@ export default function ProjectDocumentPage() {
 
   /** -----------------------------
    * DnD sensors
-   * - 클릭으로 버튼이 눌리지 않도록 약간의 이동 후 드래그 시작(거리 6px)
    * ------------------------------ */
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -395,7 +399,6 @@ export default function ProjectDocumentPage() {
         setNodeNameEdits({});
 
         closeFileModal();
-
         return;
       }
 
@@ -456,7 +459,6 @@ export default function ProjectDocumentPage() {
       map[f.nodeId].push(f);
     }
     for (const k of Object.keys(map)) {
-      // ✅ order 우선 정렬 (없으면 0으로 취급)
       map[k].sort((a, b) => ((a.order ?? 0) - (b.order ?? 0)) || (a.displayName + a.version).localeCompare(b.displayName + b.version));
     }
     return map;
@@ -523,88 +525,527 @@ export default function ProjectDocumentPage() {
    * 노드가 없는 프로젝트 자동 복구(루트만)
    * ------------------------------ */
   async function ensureProjectScaffold(projectId: string, projectNameForRoot: string) {
-    // ✅ 기존 코드 유지 (원본 파일의 로직을 그대로 가져와야 합니다)
-    // ⚠️ 아래는 “원본 파일에 이미 존재”한다고 가정하고 있으며,
-    //     사용자가 업로드한 원본 전체 코드에 포함되어 있던 구현부를 유지해야 합니다.
+    if (!uid) return;
+
+    // ✅ 이미 루트 노드가 있으면 종료
+    const qy = query(collection(db, "project_document_nodes"), where("projectId", "==", projectId), where("type", "==", "project"), limit(1));
+    const snap = await getDocs(qy);
+    if (!snap.empty) return;
+
+    // ✅ 루트 노드 생성
+    await addDoc(collection(db, "project_document_nodes"), {
+      projectId,
+      type: "project",
+      parentId: null,
+      name: projectNameForRoot || "PROJECT",
+      order: 1,
+      createdBy: uid,
+      createdByEmail: userEmail ?? null,
+      createdAt: serverTimestamp(),
+    });
+
+    await writeAudit(projectId, "SCAFFOLD_REPAIR", {
+      message: "root project node was missing -> created automatically",
+    });
   }
 
   /** -----------------------------
    * 프로젝트 전체 로드
    * ------------------------------ */
   async function loadProjectAll(projectId: string) {
-    // ✅ 기존 코드 유지 (원본 파일의 로직을 그대로 가져와야 합니다)
+    setLoading(true);
+    try {
+      // 1) 프로젝트 문서
+      const pRef = doc(db, "project_documents", projectId);
+      const pSnap = await getDoc(pRef);
+      const pData = pSnap.exists() ? ({ id: pSnap.id, ...(pSnap.data() as any) } as ProjectDoc) : null;
+      setProject(pData);
+
+      // 2) 노드
+      const nodesQ = query(collection(db, "project_document_nodes"), where("projectId", "==", projectId), limit(2000));
+      const nodesSnap = await getDocs(nodesQ);
+      const nodeList = nodesSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as TreeNode[];
+
+      // 루트가 없으면 자동 생성 후 재로드
+      const hasRoot = nodeList.some((n) => n.type === "project");
+      if (!hasRoot) {
+        await ensureProjectScaffold(projectId, pData?.name ?? "PROJECT");
+        const nodesSnap2 = await getDocs(nodesQ);
+        const nodeList2 = nodesSnap2.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as TreeNode[];
+        setNodes(nodeList2);
+
+        // 편집값 초기화
+        setNodeNameEdits((prev) => {
+          const next = { ...prev };
+          for (const n of nodeList2) {
+            if (n.type === "category" && next[n.id] === undefined) next[n.id] = n.name ?? "";
+          }
+          return next;
+        });
+      } else {
+        setNodes(nodeList);
+
+        // 편집값 초기화
+        setNodeNameEdits((prev) => {
+          const next = { ...prev };
+          for (const n of nodeList) {
+            if (n.type === "category" && next[n.id] === undefined) next[n.id] = n.name ?? "";
+          }
+          return next;
+        });
+      }
+
+      // 3) 파일
+      const filesQ = query(collection(db, "project_document_files"), where("projectId", "==", projectId), limit(4000));
+      const filesSnap = await getDocs(filesQ);
+      const fileList = filesSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as FileItem[];
+      setFiles(fileList);
+
+      // 4) mods
+      const modsQ = query(collection(db, "project_document_mods"), where("projectId", "==", projectId), limit(4000));
+      const modsSnap = await getDocs(modsQ);
+      const modList = modsSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as ModDoc[];
+      setMods(modList);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] loadProjectAll failed:", e);
+    } finally {
+      setLoading(false);
+    }
   }
 
   /** -----------------------------
    * 프로젝트 생성
    * ------------------------------ */
   async function handleCreateProject() {
-    // ✅ 기존 코드 유지 (원본 파일의 로직을 그대로 가져와야 합니다)
+    if (!uid) return;
+    const name = projectName.trim();
+    if (!name) return;
+
+    setLoading(true);
+    try {
+      const p = await addDoc(collection(db, "project_documents"), {
+        name,
+        createdBy: uid,
+        createdByEmail: userEmail ?? null,
+        createdAt: serverTimestamp(),
+      });
+
+      await writeAudit(p.id, "PROJECT_CREATE", { name });
+
+      // ✅ 루트 노드 생성
+      await addDoc(collection(db, "project_document_nodes"), {
+        projectId: p.id,
+        type: "project",
+        parentId: null,
+        name,
+        order: 1,
+        createdBy: uid,
+        createdByEmail: userEmail ?? null,
+        createdAt: serverTimestamp(),
+      });
+
+      setProjectName("");
+      setActiveProjectId(p.id);
+
+      // 목록 갱신
+      await loadMyProjectsAndAutoSelect(uid);
+      await loadProjectAll(p.id);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] create project failed:", e);
+    } finally {
+      setLoading(false);
+    }
   }
 
   /** -----------------------------
    * 카테고리 생성/수정/삭제
    * ------------------------------ */
   async function handleAddCategory(parentId: string) {
-    // ✅ 기존 코드 유지
+    if (!uid || !activeProjectId) return;
+    const name = (newCategoryNameByParent[parentId] ?? "").trim();
+    if (!name) return;
+
+    setLoading(true);
+    try {
+      // ✅ 같은 parent의 max order 계산
+      const siblings = (nodesByParent[parentId] ?? []).filter((n) => n.type === "category");
+      const maxOrder = siblings.reduce((m, s) => Math.max(m, s.order ?? 0), 0);
+
+      const created = await addDoc(collection(db, "project_document_nodes"), {
+        projectId: activeProjectId,
+        type: "category",
+        parentId,
+        name,
+        order: maxOrder + 1,
+        createdBy: uid,
+        createdByEmail: userEmail ?? null,
+        createdAt: serverTimestamp(),
+      });
+
+      await writeAudit(activeProjectId, "CATEGORY_CREATE", { parentId, nodeId: created.id, name });
+
+      setNewCategoryNameByParent((prev) => ({ ...prev, [parentId]: "" }));
+      await loadProjectAll(activeProjectId);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] add category failed:", e);
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function handleSaveCategoryName(nodeId: string) {
-    // ✅ 기존 코드 유지
+    if (!uid || !activeProjectId) return;
+    const name = (nodeNameEdits[nodeId] ?? "").trim();
+    if (!name) return;
+
+    setLoading(true);
+    try {
+      await updateDoc(doc(db, "project_document_nodes", nodeId), {
+        name,
+      });
+
+      await writeAudit(activeProjectId, "CATEGORY_UPDATE", { nodeId, name });
+
+      await loadProjectAll(activeProjectId);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] save category failed:", e);
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function handleDeleteCategory(nodeId: string) {
-    // ✅ 기존 코드 유지
+    if (!uid || !activeProjectId) return;
+
+    // ✅ 하위 카테고리 / 파일 존재 시 삭제 금지
+    const hasChild = (nodesByParent[nodeId] ?? []).some((n) => n.type === "category");
+    const hasFiles = (filesByNode[nodeId] ?? []).length > 0;
+
+    if (hasChild || hasFiles) {
+      alert("하위 카테고리 또는 파일이 존재하면 삭제할 수 없습니다.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await deleteDoc(doc(db, "project_document_nodes", nodeId));
+      await writeAudit(activeProjectId, "CATEGORY_DELETE", { nodeId });
+      await loadProjectAll(activeProjectId);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] delete category failed:", e);
+    } finally {
+      setLoading(false);
+    }
   }
 
   /** -----------------------------
    * 파일 모달/업로드/삭제
    * ------------------------------ */
   function closeFileModal() {
-    // ✅ 기존 코드 유지
+    setFileModalOpen(false);
+    setFileModalMode("create");
+    setFileModalNodeId(null);
+    setFileModalFileId(null);
+    setFileModalDisplayName("");
+    setFileModalVersion("");
+    setFileModalFileObj(null);
   }
 
   function openFileModalCreate(nodeId: string) {
-    // ✅ 기존 코드 유지
+    setFileModalOpen(true);
+    setFileModalMode("create");
+    setFileModalNodeId(nodeId);
+    setFileModalFileId(null);
+    setFileModalDisplayName("");
+    setFileModalVersion("");
+    setFileModalFileObj(null);
   }
 
   function openFileModalEdit(f: FileItem) {
-    // ✅ 기존 코드 유지
+    setFileModalOpen(true);
+    setFileModalMode("edit");
+    setFileModalNodeId(f.nodeId);
+    setFileModalFileId(f.id);
+    setFileModalDisplayName(f.displayName ?? "");
+    setFileModalVersion(f.version ?? "");
+    setFileModalFileObj(null);
   }
 
   async function saveFileMetaFromModal() {
-    // ✅ 기존 코드 유지
+    if (!uid || !activeProjectId) return;
+    if (!fileModalNodeId) return;
+
+    const displayName = fileModalDisplayName.trim();
+    const version = fileModalVersion.trim();
+
+    setLoading(true);
+    try {
+      if (fileModalMode === "create") {
+        // ✅ nodeId 아래 파일들의 max order
+        const nodeFiles = filesByNode[fileModalNodeId] ?? [];
+        const maxOrder = nodeFiles.reduce((m, f) => Math.max(m, f.order ?? 0), 0);
+
+        const created = await addDoc(collection(db, "project_document_files"), {
+          projectId: activeProjectId,
+          nodeId: fileModalNodeId,
+          displayName,
+          version,
+          order: maxOrder + 1,
+          originalName: "",
+          storagePath: "",
+          downloadUrl: "",
+          createdBy: uid,
+          createdByEmail: userEmail ?? null,
+          createdAt: serverTimestamp(),
+        });
+
+        await writeAudit(activeProjectId, "FILE_META_CREATE", {
+          fileId: created.id,
+          nodeId: fileModalNodeId,
+          displayName,
+          version,
+        });
+
+        // ✅ 생성된 fileId를 모달 상태에 보관(업로드 시 사용)
+        setFileModalFileId(created.id);
+      } else {
+        if (!fileModalFileId) return;
+        await updateDoc(doc(db, "project_document_files", fileModalFileId), {
+          displayName,
+          version,
+        });
+
+        await writeAudit(activeProjectId, "FILE_META_UPDATE", {
+          fileId: fileModalFileId,
+          displayName,
+          version,
+        });
+      }
+
+      await loadProjectAll(activeProjectId);
+      alert("저장 완료");
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] saveFileMetaFromModal failed:", e);
+      alert("저장 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function uploadFileFromModal() {
-    // ✅ 기존 코드 유지
+    if (!uid || !activeProjectId) return;
+    if (!fileModalNodeId) return;
+    if (!fileModalFileId) {
+      alert("먼저 ‘저장’을 눌러 파일 메타를 생성해 주세요.");
+      return;
+    }
+    if (!fileModalFileObj) {
+      alert("업로드할 파일을 선택해 주세요.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      // 기존 파일 정보 로드(기존 storagePath가 있으면 삭제 시도)
+      const fileRef = doc(db, "project_document_files", fileModalFileId);
+      const fileSnap = await getDoc(fileRef);
+      const prev = fileSnap.exists() ? (fileSnap.data() as any) : null;
+
+      const storagePath = `project_documents/${activeProjectId}/files/${fileModalFileId}/${fileModalFileObj.name}`;
+      const storageRef = ref(storage, storagePath);
+
+      // ✅ 업로드
+      await uploadBytes(storageRef, fileModalFileObj);
+      const downloadUrl = await getDownloadURL(storageRef);
+
+      // ✅ 이전 storagePath 정리(가능한 경우만)
+      if (prev?.storagePath && typeof prev.storagePath === "string" && prev.storagePath !== storagePath) {
+        try {
+          await deleteObject(ref(storage, prev.storagePath));
+        } catch {
+          // 삭제 실패는 치명적이지 않음(권한/존재 이슈 등)
+        }
+      }
+
+      // ✅ Firestore 갱신
+      await updateDoc(fileRef, {
+        originalName: fileModalFileObj.name,
+        storagePath,
+        downloadUrl,
+      });
+
+      await writeAudit(activeProjectId, "FILE_UPLOAD", {
+        fileId: fileModalFileId,
+        nodeId: fileModalNodeId,
+        storagePath,
+      });
+
+      await loadProjectAll(activeProjectId);
+      alert("업로드 완료");
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] uploadFileFromModal failed:", e);
+      alert("업로드 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   function handleFileModalDrop(e: React.DragEvent<HTMLDivElement>) {
-    // ✅ 기존 코드 유지
+    e.preventDefault();
+    const f = e.dataTransfer.files?.[0];
+    if (!f) return;
+    setFileModalFileObj(f);
   }
 
   async function handleDeleteFile(fileId: string) {
-    // ✅ 기존 코드 유지
+    if (!uid || !activeProjectId) return;
+
+    if (!confirm("파일을 삭제하시겠습니까? (하위 Modification List도 함께 삭제됩니다)")) return;
+
+    setLoading(true);
+    try {
+      // 1) 파일 문서 로드
+      const fRef = doc(db, "project_document_files", fileId);
+      const fSnap = await getDoc(fRef);
+      const fData = fSnap.exists() ? (fSnap.data() as any) : null;
+
+      // 2) 관련 mods 삭제(스토리지 포함)
+      const relatedMods = mods.filter((m) => m.fileId === fileId);
+      for (const m of relatedMods) {
+        if (m.storagePath) {
+          try {
+            await deleteObject(ref(storage, m.storagePath));
+          } catch {}
+        }
+        await deleteDoc(doc(db, "project_document_mods", m.id));
+      }
+
+      // 3) 파일 스토리지 삭제
+      if (fData?.storagePath) {
+        try {
+          await deleteObject(ref(storage, fData.storagePath));
+        } catch {}
+      }
+
+      // 4) 파일 문서 삭제
+      await deleteDoc(fRef);
+
+      await writeAudit(activeProjectId, "FILE_DELETE", { fileId });
+
+      await loadProjectAll(activeProjectId);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] delete file failed:", e);
+      alert("삭제 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function handleCreateMod(f: FileItem) {
-    // ✅ 기존 코드 유지
+    if (!uid || !activeProjectId) return;
+
+    setLoading(true);
+    try {
+      // ✅ mod 문서 생성
+      const created = await addDoc(collection(db, "project_document_mods"), {
+        projectId: activeProjectId,
+        fileId: f.id,
+        storagePath: "",
+        downloadUrl: "",
+        createdBy: uid,
+        createdByEmail: userEmail ?? null,
+        createdAt: serverTimestamp(),
+      });
+
+      // ✅ md 파일 업로드(기본 템플릿)
+      const content = `# Modification List\n\n- fileId: ${f.id}\n- createdAt: ${new Date().toISOString()}\n`;
+      const blob = new Blob([content], { type: "text/markdown" });
+      const storagePath = `project_documents/${activeProjectId}/mods/${f.id}/${created.id}.md`;
+      const sRef = ref(storage, storagePath);
+
+      await uploadBytes(sRef, blob);
+      const downloadUrl = await getDownloadURL(sRef);
+
+      await updateDoc(doc(db, "project_document_mods", created.id), {
+        storagePath,
+        downloadUrl,
+      });
+
+      await writeAudit(activeProjectId, "MOD_CREATE", { fileId: f.id, modId: created.id, storagePath });
+
+      await loadProjectAll(activeProjectId);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] create mod failed:", e);
+      alert("생성 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function handleDeleteMod(modId: string) {
-    // ✅ 기존 코드 유지
+    if (!uid || !activeProjectId) return;
+
+    if (!confirm("문서를 삭제하시겠습니까?")) return;
+
+    setLoading(true);
+    try {
+      const mRef = doc(db, "project_document_mods", modId);
+      const mSnap = await getDoc(mRef);
+      const mData = mSnap.exists() ? (mSnap.data() as any) : null;
+
+      if (mData?.storagePath) {
+        try {
+          await deleteObject(ref(storage, mData.storagePath));
+        } catch {}
+      }
+
+      await deleteDoc(mRef);
+      await writeAudit(activeProjectId, "MOD_DELETE", { modId });
+
+      await loadProjectAll(activeProjectId);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] delete mod failed:", e);
+      alert("삭제 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   /** -----------------------------
    * ✅ order 저장 (카테고리/파일)
    * ------------------------------ */
   async function persistCategoryOrder(parentId: string, orderedNodeIds: string[]) {
-    // ✅ 기존 코드 유지
+    if (!activeProjectId) return;
+    const batch = writeBatch(db);
+
+    orderedNodeIds.forEach((id, idx) => {
+      batch.update(doc(db, "project_document_nodes", id), { order: idx + 1 });
+    });
+
+    await batch.commit();
+    await writeAudit(activeProjectId, "CATEGORY_REORDER", { parentId, orderedNodeIds });
   }
 
   async function persistFileOrder(nodeId: string, orderedFileIds: string[]) {
-    // ✅ 기존 코드 유지
+    if (!activeProjectId) return;
+    const batch = writeBatch(db);
+
+    orderedFileIds.forEach((id, idx) => {
+      batch.update(doc(db, "project_document_files", id), { order: idx + 1 });
+    });
+
+    await batch.commit();
+    await writeAudit(activeProjectId, "FILE_REORDER", { nodeId, orderedFileIds });
   }
 
   /** -----------------------------
@@ -630,9 +1071,10 @@ export default function ProjectDocumentPage() {
 
     // ✅ UI 즉시 반영
     setNodes((prev) => {
-      const others = prev.filter((n) => n.parentId !== parentId);
-      const target = reordered.map((n, idx) => ({ ...n, order: idx + 1 }));
-      return [...others, ...target];
+      const targetIds = new Set(reorderedIds);
+      const rest = prev.filter((n) => !targetIds.has(n.id));
+      const updated = reordered.map((n, idx) => ({ ...n, order: idx + 1 }));
+      return [...rest, ...updated];
     });
 
     // ✅ DB 저장
@@ -668,9 +1110,10 @@ export default function ProjectDocumentPage() {
 
     // ✅ UI 즉시 반영
     setFiles((prev) => {
-      const others = prev.filter((f) => f.nodeId !== nodeId);
-      const target = reordered.map((f, idx) => ({ ...f, order: idx + 1 }));
-      return [...others, ...target];
+      const targetIds = new Set(reorderedIds);
+      const rest = prev.filter((f) => !targetIds.has(f.id));
+      const updated = reordered.map((f, idx) => ({ ...f, order: idx + 1 }));
+      return [...rest, ...updated];
     });
 
     // ✅ DB 저장
@@ -684,170 +1127,120 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
-   * UI - recursive render
-   * - 핵심 수정: hideHeader 옵션으로 “중복 렌더” 제거
+   * ✅ 중복 렌더 제거된 재귀 렌더
+   * - 각 카테고리는 각 레벨에서 "1번만" 렌더
    * ------------------------------ */
-  function renderNode(node: TreeNode, depth: number, options?: { hideHeader?: boolean }) {
-    const childNodes = nodesByParent[node.id] ?? [];
-    const childCategories = childNodes.filter((n) => n.type === "category");
-    const nodeFiles = filesByNode[node.id] ?? [];
+  function renderChildrenCategories(parentId: string, depth: number) {
+    const children = (nodesByParent[parentId] ?? []).filter((n) => n.type === "category");
+    if (children.length === 0) return null;
 
+    const dndIds = children.map((c) => `node:${c.id}`);
+
+    return (
+      <div className="mt-3 space-y-3">
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragEnd={(e) => void onDragEndCategory(parentId, children, e)}
+        >
+          <SortableContext items={dndIds} strategy={verticalListSortingStrategy}>
+            <div className="space-y-3">
+              {children.map((c) => renderCategoryNode(c, depth))}
+            </div>
+          </SortableContext>
+        </DndContext>
+      </div>
+    );
+  }
+
+  function renderCategoryNode(node: TreeNode, depth: number) {
     const indent = Math.min(depth * 16, 64);
 
-    const categoryDndIds = childCategories.map((n) => `node:${n.id}`);
+    const nodeFiles = filesByNode[node.id] ?? [];
     const fileDndIds = nodeFiles.map((f) => `file:${f.id}`);
 
     return (
-      <div key={node.id} className="border rounded-md p-3 mb-3 bg-white/50 dark:bg-black/20">
-        {/* ✅ 헤더(자기 자신) 영역: 필요할 때만 렌더링 */}
-        {!options?.hideHeader && (
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2" style={{ paddingLeft: indent }}>
-              {node.type === "project" ? (
-                <span className="text-sm font-semibold">📌 {node.name}</span>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold">📁</span>
-                  <input
-                    className="border rounded px-2 py-1 text-sm bg-transparent w-[260px]"
-                    value={nodeNameEdits[node.id] ?? node.name ?? ""}
-                    onChange={(e) => setNodeNameEdits((prev) => ({ ...prev, [node.id]: e.target.value }))}
-                    disabled={loading}
-                    title="카테고리명 수정"
-                  />
-                  <button
-                    type="button"
-                    className="text-xs px-2 py-1 rounded border"
-                    onClick={() => handleSaveCategoryName(node.id)}
-                    disabled={loading}
-                  >
-                    저장
-                  </button>
-                  <button
-                    type="button"
-                    className="text-xs px-2 py-1 rounded border"
-                    onClick={() => handleDeleteCategory(node.id)}
-                    disabled={loading}
-                    title="하위/파일이 없을 때만 삭제 가능"
-                  >
-                    삭제
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* 하위 카테고리 생성: hideHeader일 때는 “리스트에서 이미 제공”하므로 숨김 */}
-            <div className="flex items-center gap-2">
-              <input
-                className="border rounded px-2 py-1 text-sm w-48 bg-transparent"
-                placeholder="하위 카테고리명"
-                value={newCategoryNameByParent[node.id] ?? ""}
-                onChange={(e) => setNewCategoryNameByParent((prev) => ({ ...prev, [node.id]: e.target.value }))}
-                disabled={loading}
-              />
-              <button type="button" className="px-3 py-1 rounded border text-sm" onClick={() => handleAddCategory(node.id)} disabled={loading}>
-                + 카테고리 생성
-              </button>
-            </div>
+      <div key={node.id} className="border rounded-md p-3 bg-white/40 dark:bg-black/15">
+        {/* ✅ 카테고리 헤더(한 번만 표시) */}
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2" style={{ paddingLeft: indent }}>
+            <SortableCategoryRow
+              dndId={`node:${node.id}`}
+              node={node}
+              loading={loading}
+              nameValue={nodeNameEdits[node.id] ?? node.name ?? ""}
+              onNameChange={(v) => setNodeNameEdits((prev) => ({ ...prev, [node.id]: v }))}
+              onSave={() => void handleSaveCategoryName(node.id)}
+              onDelete={() => void handleDeleteCategory(node.id)}
+            />
           </div>
-        )}
 
-        {/* ✅ 카테고리 노드에만 파일 관리 표시 (hideHeader여도 필요하므로 유지) */}
-        {node.type === "category" && (
-          <div className="mt-4" style={{ paddingLeft: indent }}>
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-sm font-medium">📎 파일 관리</div>
-
-              <button type="button" className="px-3 py-1 rounded border text-sm" onClick={() => openFileModalCreate(node.id)} disabled={loading}>
-                + 파일 등록
-              </button>
-            </div>
-
-            {nodeFiles.length === 0 ? (
-              <div className="text-sm opacity-70">등록된 파일이 없습니다. 우측의 “+ 파일 등록”으로 추가해 주세요.</div>
-            ) : (
-              <DndContext
-                sensors={sensors}
-                collisionDetection={closestCenter}
-                onDragEnd={(e) => void onDragEndFile(node.id, nodeFiles, e)}
-              >
-                <SortableContext items={fileDndIds} strategy={verticalListSortingStrategy}>
-                  <div className="space-y-2">
-                    {nodeFiles.map((f) => (
-                      <SortableFileRow
-                        key={f.id}
-                        dndId={`file:${f.id}`}
-                        file={f}
-                        loading={loading}
-                        onEdit={() => openFileModalEdit(f)}
-                        onDelete={() => void handleDeleteFile(f.id)}
-                        onCreateMod={() => void handleCreateMod(f)}
-                        mods={modsByFile[f.id] ?? []}
-                        onDeleteMod={(modId) => void handleDeleteMod(modId)}
-                      />
-                    ))}
-                  </div>
-                </SortableContext>
-              </DndContext>
-            )}
+          {/* ✅ 하위 카테고리 생성 */}
+          <div className="flex items-center gap-2">
+            <input
+              className="border rounded px-2 py-1 text-sm w-48 bg-transparent"
+              placeholder="하위 카테고리명"
+              value={newCategoryNameByParent[node.id] ?? ""}
+              onChange={(e) => setNewCategoryNameByParent((prev) => ({ ...prev, [node.id]: e.target.value }))}
+              disabled={loading}
+            />
+            <button
+              type="button"
+              className="px-3 py-1 rounded border text-sm"
+              onClick={() => void handleAddCategory(node.id)}
+              disabled={loading}
+            >
+              + 카테고리 생성
+            </button>
           </div>
-        )}
+        </div>
 
-        {/* ✅ 자식 카테고리 리스트 (형제끼리만 DnD 정렬) */}
-        {childCategories.length > 0 && (
-          <div className="mt-3 space-y-3">
+        {/* ✅ 파일 관리 */}
+        <div className="mt-4" style={{ paddingLeft: indent }}>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm font-medium">📎 파일 관리</div>
+
+            <button
+              type="button"
+              className="px-3 py-1 rounded border text-sm"
+              onClick={() => openFileModalCreate(node.id)}
+              disabled={loading}
+            >
+              + 파일 등록
+            </button>
+          </div>
+
+          {nodeFiles.length === 0 ? (
+            <div className="text-sm opacity-70">등록된 파일이 없습니다. 우측의 “+ 파일 등록”으로 추가해 주세요.</div>
+          ) : (
             <DndContext
               sensors={sensors}
               collisionDetection={closestCenter}
-              onDragEnd={(e) => void onDragEndCategory(node.id, childCategories, e)}
+              onDragEnd={(e) => void onDragEndFile(node.id, nodeFiles, e)}
             >
-              <SortableContext items={categoryDndIds} strategy={verticalListSortingStrategy}>
-                <div className="space-y-3">
-                  {childCategories.map((c) => (
-                    <div key={c.id} className="border rounded-md p-3 bg-white/40 dark:bg-black/15">
-                      {/* ✅ 여기(리스트)에서 카테고리 헤더를 렌더링 */}
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-2" style={{ paddingLeft: Math.min((depth + 1) * 16, 64) }}>
-                          <SortableCategoryRow
-                            dndId={`node:${c.id}`}
-                            node={c}
-                            loading={loading}
-                            nameValue={nodeNameEdits[c.id] ?? c.name ?? ""}
-                            onNameChange={(v) => setNodeNameEdits((prev) => ({ ...prev, [c.id]: v }))}
-                            onSave={() => void handleSaveCategoryName(c.id)}
-                            onDelete={() => void handleDeleteCategory(c.id)}
-                          />
-                        </div>
-
-                        {/* ✅ 하위 카테고리 생성 (리스트에서 제공) */}
-                        <div className="flex items-center gap-2">
-                          <input
-                            className="border rounded px-2 py-1 text-sm w-48 bg-transparent"
-                            placeholder="하위 카테고리명"
-                            value={newCategoryNameByParent[c.id] ?? ""}
-                            onChange={(e) => setNewCategoryNameByParent((prev) => ({ ...prev, [c.id]: e.target.value }))}
-                            disabled={loading}
-                          />
-                          <button
-                            type="button"
-                            className="px-3 py-1 rounded border text-sm"
-                            onClick={() => void handleAddCategory(c.id)}
-                            disabled={loading}
-                          >
-                            + 카테고리 생성
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* ✅ 핵심: 재귀 호출에서는 "헤더를 숨기고" 하위 내용만 렌더링 → 중복 제거 */}
-                      <div className="mt-3">{renderNode(c, depth + 1, { hideHeader: true })}</div>
-                    </div>
+              <SortableContext items={fileDndIds} strategy={verticalListSortingStrategy}>
+                <div className="space-y-2">
+                  {nodeFiles.map((f) => (
+                    <SortableFileRow
+                      key={f.id}
+                      dndId={`file:${f.id}`}
+                      file={f}
+                      loading={loading}
+                      onEdit={() => openFileModalEdit(f)}
+                      onDelete={() => void handleDeleteFile(f.id)}
+                      onCreateMod={() => void handleCreateMod(f)}
+                      mods={modsByFile[f.id] ?? []}
+                      onDeleteMod={(modId) => void handleDeleteMod(modId)}
+                    />
                   ))}
                 </div>
               </SortableContext>
             </DndContext>
-          </div>
-        )}
+          )}
+        </div>
+
+        {/* ✅ 자식 카테고리 재귀 렌더 */}
+        <div className="mt-3">{renderChildrenCategories(node.id, depth + 1)}</div>
       </div>
     );
   }
@@ -855,6 +1248,11 @@ export default function ProjectDocumentPage() {
   /** -----------------------------
    * Render
    * ------------------------------ */
+  const root = useMemo(() => {
+    if (!activeProjectId) return null;
+    return nodes.find((n) => n.type === "project" && n.projectId === activeProjectId) ?? null;
+  }, [nodes, activeProjectId]);
+
   return (
     <main className="p-6">
       <div className="flex items-center justify-between gap-3 mb-6">
@@ -868,7 +1266,6 @@ export default function ProjectDocumentPage() {
           <div className="flex flex-col gap-2">
             <div className="text-sm font-semibold">내 프로젝트</div>
 
-            {/* ✅ 다크/라이트 모두 가독성 확보 */}
             <select
               className="border rounded px-3 py-2 w-full md:w-[420px] bg-white text-black dark:bg-slate-900 dark:text-white"
               value={activeProjectId ?? ""}
@@ -916,10 +1313,42 @@ export default function ProjectDocumentPage() {
       ) : (
         <section>
           {loading && <div className="text-sm opacity-70 mb-3">처리 중...</div>}
-          {!rootNodeId ? (
-            <div className="text-sm opacity-70">프로젝트 노드를 불러오지 못했습니다. (노드가 없으면 자동 복구 생성됩니다)</div>
+
+          {!root ? (
+            <div className="text-sm opacity-70">
+              프로젝트 노드를 불러오지 못했습니다. (노드가 없으면 자동 복구 생성됩니다)
+            </div>
           ) : (
-            nodes.filter((n) => n.id === rootNodeId).map((root) => renderNode(root, 0))
+            <div className="border rounded-md p-3 mb-3 bg-white/50 dark:bg-black/20">
+              {/* ✅ 프로젝트 헤더 */}
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold">📌 {root.name}</span>
+                </div>
+
+                {/* ✅ 루트 하위 카테고리 생성 */}
+                <div className="flex items-center gap-2">
+                  <input
+                    className="border rounded px-2 py-1 text-sm w-48 bg-transparent"
+                    placeholder="하위 카테고리명"
+                    value={newCategoryNameByParent[root.id] ?? ""}
+                    onChange={(e) => setNewCategoryNameByParent((prev) => ({ ...prev, [root.id]: e.target.value }))}
+                    disabled={loading}
+                  />
+                  <button
+                    type="button"
+                    className="px-3 py-1 rounded border text-sm"
+                    onClick={() => void handleAddCategory(root.id)}
+                    disabled={loading}
+                  >
+                    + 카테고리 생성
+                  </button>
+                </div>
+              </div>
+
+              {/* ✅ 프로젝트 루트의 자식 카테고리 */}
+              <div className="mt-3">{renderChildrenCategories(root.id, 1)}</div>
+            </div>
           )}
         </section>
       )}
@@ -999,6 +1428,10 @@ export default function ProjectDocumentPage() {
               <button type="button" className="px-4 py-2 rounded border text-sm" onClick={closeFileModal} disabled={loading}>
                 취소
               </button>
+            </div>
+
+            <div className="text-xs opacity-60 mt-3">
+              * 업로드 전에 “저장”을 먼저 눌러 파일 메타(문서)를 생성해 주세요.
             </div>
           </div>
         </div>
