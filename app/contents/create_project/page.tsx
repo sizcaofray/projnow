@@ -2,9 +2,10 @@
 
 // app/contents/create_project/page.tsx
 // Project(최상위 단위) 생성/수정/삭제 UI
+// ✅ FIX: Firestore transaction 규칙(모든 read 후 write) 준수하도록 tx.get 순서 수정
 // - UID는 PRJ_000001 형태로 자동 생성됩니다.
 // - 삭제는 confirm으로 재확인합니다.
-// - 현재는 "owner(생성자)" 프로젝트만 표시합니다. (3번 초대 기능은 다음 단계에서 확장)
+// - 관리자 전용 메뉴(규칙/라우팅 가드는 별도)
 
 import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
@@ -20,7 +21,7 @@ import {
   where,
 } from "firebase/firestore";
 
-import { auth, db } from "@/lib/firebase/firebase"; // ✅ 현재 프로젝트 경로 기준
+import { auth, db } from "@/lib/firebase/firebase";
 
 type ProjectDoc = {
   uid: string; // PRJ_000001
@@ -69,8 +70,7 @@ export default function CreateProjectPage() {
   }, []);
 
   // 내 프로젝트 목록 구독(실시간)
-  // ⚠️ where + orderBy 조합은 Firestore 인덱스 요구가 생길 수 있어,
-  //    우선 where만 사용하고 UI에서 정렬하는 방식으로 처리합니다.
+  // - where만 쓰고, UI에서 정렬(인덱스 이슈 회피)
   useEffect(() => {
     if (!userUid) return;
 
@@ -83,7 +83,7 @@ export default function CreateProjectPage() {
       (snap) => {
         const rows = snap.docs.map((d) => d.data() as ProjectDoc);
 
-        // createdAt 기준 최신순 정렬(서버 timestamp이므로 없을 수 있어 방어)
+        // createdAt 최신순 정렬(서버 timestamp이므로 없을 수 있어 방어)
         rows.sort((a, b) => {
           const at = a.createdAt?.toMillis?.() ?? 0;
           const bt = b.createdAt?.toMillis?.() ?? 0;
@@ -111,24 +111,26 @@ export default function CreateProjectPage() {
 
     try {
       await runTransaction(db, async (tx) => {
-        // counters/projects 문서를 트랜잭션으로 증가시키고,
-        // 증가된 값으로 PRJ_000001 형태를 만든 뒤 projects/{uid} 생성합니다.
         const counterRef = doc(db, "counters", "projects");
-        const counterSnap = await tx.get(counterRef);
 
+        // ✅ [READ 1] counter 읽기
+        const counterSnap = await tx.get(counterRef);
         const last = counterSnap.exists() ? Number(counterSnap.data().last ?? 0) : 0;
         const next = last + 1;
 
-        // 카운터 업데이트(없으면 생성)
-        tx.set(counterRef, { last: next }, { merge: true });
-
+        // next 값을 기반으로 uid 결정
         const uid = `PRJ_${pad6(next)}`;
         const projectRef = doc(db, "projects", uid);
 
+        // ✅ [READ 2] projectRef 존재 확인도 "write 전에" 수행해야 함
         const existing = await tx.get(projectRef);
         if (existing.exists()) {
+          // 이 경우는 극히 드물지만, 트랜잭션 규칙 위반 없이 방어
           throw new Error("이미 존재하는 프로젝트 UID입니다. 다시 시도해주세요.");
         }
+
+        // ✅ 여기부터는 WRITE만 수행 (Firestore 트랜잭션 규칙 준수)
+        tx.set(counterRef, { last: next }, { merge: true });
 
         tx.set(projectRef, {
           uid,
@@ -184,7 +186,7 @@ export default function CreateProjectPage() {
   if (!userUid) {
     return (
       <main className="p-6">
-        <h1 className="text-xl font-bold mb-2">Create Project</h1>
+        <h1 className="text-xl font-bold mb-2">Project 생성/관리</h1>
         <p className="text-sm opacity-80">로그인 후 이용 가능합니다.</p>
       </main>
     );
