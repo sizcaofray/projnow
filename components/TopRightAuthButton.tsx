@@ -1,15 +1,14 @@
 "use client";
 
 // components/TopRightAuthButton.tsx
-// ✅ 요구사항 반영
-// 1) 상단 구독 버튼은 "전역 설정"으로 보이기/숨기기, 활성/비활성 제어
-// 2) 로그인되어야만 구독 버튼 "클릭 가능"
-// 3) 다크/라이트 모드에서 자연스럽게 보이도록 스타일 보정 (dark: 대응)
+// ✅ [ADD] Google 로그인 성공 시 users/{uid}에 name/email 저장(merge)
+// - 기존 UI/기능은 유지하고, DB 저장 로직만 추가합니다.
+// - displayName이 없으면 email 앞부분을 name으로 대체합니다.
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { GoogleAuthProvider, signInWithPopup, signOut } from "firebase/auth";
-import { doc, onSnapshot } from "firebase/firestore";
+import { doc, getDoc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
 
 import { useAuth } from "@/lib/auth/useAuth";
 import { getFirebaseAuth } from "@/lib/firebase/client";
@@ -19,6 +18,17 @@ type UiConfig = {
   headerSubscribeVisible: boolean; // 구독 버튼 보이기/숨기기
   headerSubscribeEnabled: boolean; // 구독 버튼 활성/비활성(단, 로그인되어야 클릭 가능)
 };
+
+// ✅ 이메일 정규화(초대 기능 where(email==)에도 유리)
+function normalizeEmail(v: string) {
+  return (v ?? "").trim().toLowerCase();
+}
+
+// ✅ displayName이 없을 때 대체 이름
+function fallbackNameFromEmail(email: string) {
+  const at = email.indexOf("@");
+  return at > 0 ? email.slice(0, at) : email;
+}
 
 export default function TopRightAuthButton() {
   const { user, loading, initError } = useAuth();
@@ -49,7 +59,6 @@ export default function TopRightAuthButton() {
       (snap) => {
         const data = (snap.exists() ? snap.data() : null) as any;
 
-        // 필드가 없으면 기본값 유지
         const visible =
           typeof data?.headerSubscribeVisible === "boolean"
             ? data.headerSubscribeVisible
@@ -66,13 +75,36 @@ export default function TopRightAuthButton() {
         });
       },
       () => {
-        // 읽기 실패 시에도 기본값(보이기+활성)로 유지
         setUi({ headerSubscribeVisible: true, headerSubscribeEnabled: true });
       }
     );
 
     return () => unsub();
   }, []);
+
+  // ✅ [ADD] users/{uid} 업서트(merge)
+  const upsertUserProfile = async (uid: string, emailRaw: string, displayNameRaw: string | null) => {
+    const email = normalizeEmail(emailRaw);
+    const name = (displayNameRaw ?? "").trim() || fallbackNameFromEmail(email);
+
+    const userRef = doc(db, "users", uid);
+
+    // createdAt은 최초 1회만 기록하기 위해 존재 여부 확인
+    const snap = await getDoc(userRef);
+
+    const payload: any = {
+      email,
+      name,
+      updatedAt: serverTimestamp(),
+    };
+
+    if (!snap.exists()) {
+      payload.createdAt = serverTimestamp();
+    }
+
+    // role, isSubscribed 등 기존 필드 보존
+    await setDoc(userRef, payload, { merge: true });
+  };
 
   /** Google 로그인 */
   const handleLogin = async () => {
@@ -85,7 +117,15 @@ export default function TopRightAuthButton() {
 
       setAuthBusy(true);
       const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
+
+      // ✅ 로그인
+      const cred = await signInWithPopup(auth, provider);
+
+      // ✅ [ADD] 로그인 성공 직후 name/email 저장
+      const u = cred.user;
+      if (u?.uid) {
+        await upsertUserProfile(u.uid, u.email ?? "", u.displayName ?? null);
+      }
     } catch (e: any) {
       setActionError(e?.message ?? "로그인 중 오류가 발생했습니다.");
     } finally {
@@ -110,15 +150,11 @@ export default function TopRightAuthButton() {
 
   const errorMsg = initError || actionError;
 
-  // ✅ 보이기/숨기기
   const showSubscribe = ui.headerSubscribeVisible;
-
-  // ✅ 클릭 가능 조건: "전역 enabled" + "로그인"
   const canClickSubscribe = ui.headerSubscribeEnabled && !!user;
 
   return (
     <div className="flex items-center gap-3">
-      {/* ✅ 구독 버튼 (전역 설정) */}
       {showSubscribe ? (
         canClickSubscribe ? (
           <Link
@@ -144,12 +180,10 @@ export default function TopRightAuthButton() {
         )
       ) : null}
 
-      {/* ✅ 상태 텍스트 */}
       <div className="hidden text-sm text-gray-600 dark:text-gray-300 sm:block">
         {loading ? "..." : user ? user.email ?? "Signed in" : "Guest"}
       </div>
 
-      {/* ✅ 로그인/로그아웃 버튼 */}
       {user ? (
         <button
           onClick={handleLogout}
@@ -170,7 +204,6 @@ export default function TopRightAuthButton() {
         </button>
       )}
 
-      {/* ✅ 에러 표시 */}
       {errorMsg ? (
         <span className="hidden max-w-[260px] truncate text-xs text-red-600 dark:text-red-300 md:inline">
           {errorMsg}
