@@ -3,12 +3,14 @@
 /**
  * projnow/app/contents/project_document/page.tsx
  *
- * ✅ 반영사항
- * 1) 카테고리 라벨 "Category:" 제거 + 카테고리명 수정 가능(인라인 input + 저장)
- * 2) 파일 등록/수정은 메뉴관리처럼 "팝업(모달)"에서 수행
- *    - + 파일 등록 버튼 → 모달에서 파일명/버전 저장 + 파일 업로드
- *    - 목록에서 "수정" 버튼 → 모달에서 파일명/버전 수정 + 파일 교체 업로드
- * 3) select 다크/라이트 가독성 유지(배경/글자색 명시)
+ * ✅ 이번 수정: 드래그&드롭 순서 조정 추가
+ * - 카테고리: 같은 parentId 아래 형제 카테고리들끼리 드래그로 order 재정렬 + Firestore 저장
+ * - 파일: 같은 nodeId(카테고리) 아래 파일들끼리 드래그로 order 재정렬 + Firestore 저장
+ *
+ * ✅ 기존 기능 유지
+ * - 카테고리명 인라인 수정/저장
+ * - 파일 등록/수정은 메뉴관리처럼 모달에서 메타 저장 + 업로드
+ * - select 다크/라이트 가독성 유지
  *
  * ⚠️ Firebase env 필요:
  * NEXT_PUBLIC_FIREBASE_API_KEY
@@ -36,6 +38,7 @@ import {
   where,
   serverTimestamp,
   limit,
+  writeBatch,
   type Firestore,
 } from "firebase/firestore";
 import {
@@ -46,6 +49,11 @@ import {
   deleteObject,
   type FirebaseStorage,
 } from "firebase/storage";
+
+/** ✅ DnD Kit */
+import { DndContext, PointerSensor, useSensor, useSensors, closestCenter, type DragEndEvent } from "@dnd-kit/core";
+import { SortableContext, useSortable, arrayMove, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 /** -----------------------------
  * Firebase init (이 파일에서 1회)
@@ -110,6 +118,9 @@ type FileItem = {
   displayName: string;
   version: string;
 
+  /** ✅ 파일 순서(드래그 정렬) */
+  order?: number;
+
   originalName: string;
   storagePath: string;
   downloadUrl?: string;
@@ -134,17 +145,191 @@ type AuditAction =
   | "PROJECT_CREATE"
   | "CATEGORY_CREATE"
   | "CATEGORY_UPDATE"
+  | "CATEGORY_REORDER"
   | "CATEGORY_DELETE"
   | "FILE_META_CREATE"
   | "FILE_META_UPDATE"
+  | "FILE_REORDER"
   | "FILE_UPLOAD"
   | "FILE_DELETE"
   | "MOD_CREATE"
   | "MOD_DELETE"
   | "SCAFFOLD_REPAIR";
 
+/** -----------------------------
+ * Sortable Row Components
+ * - 드래그 핸들 포함
+ * - 충돌 방지 위해 id는 prefix 사용
+ * ------------------------------ */
+function SortableCategoryRow(props: {
+  dndId: string; // "node:xxx"
+  node: TreeNode;
+  loading: boolean;
+  nameValue: string;
+  onNameChange: (v: string) => void;
+  onSave: () => void;
+  onDelete: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: props.dndId,
+  });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.6 : 1,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} className="flex items-center gap-2">
+      {/* ✅ 드래그 핸들 (여기 잡고 이동) */}
+      <button
+        type="button"
+        className="px-2 py-1 rounded border text-xs cursor-grab active:cursor-grabbing"
+        title="드래그로 순서 변경"
+        disabled={props.loading}
+        {...attributes}
+        {...listeners}
+      >
+        ⠿
+      </button>
+
+      <span className="text-sm font-semibold">📁</span>
+
+      {/* ✅ 카테고리명 수정 */}
+      <input
+        className="border rounded px-2 py-1 text-sm bg-transparent w-[260px]"
+        value={props.nameValue}
+        onChange={(e) => props.onNameChange(e.target.value)}
+        disabled={props.loading}
+        title="카테고리명 수정"
+      />
+
+      <button type="button" className="text-xs px-2 py-1 rounded border" onClick={props.onSave} disabled={props.loading}>
+        저장
+      </button>
+
+      <button
+        type="button"
+        className="text-xs px-2 py-1 rounded border"
+        onClick={props.onDelete}
+        disabled={props.loading}
+        title="하위/파일이 없을 때만 삭제 가능"
+      >
+        삭제
+      </button>
+    </div>
+  );
+}
+
+function SortableFileRow(props: {
+  dndId: string; // "file:xxx"
+  file: FileItem;
+  loading: boolean;
+  onEdit: () => void;
+  onDelete: () => void;
+  onCreateMod: () => void;
+  mods: ModDoc[];
+  onDeleteMod: (modId: string) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: props.dndId,
+  });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.6 : 1,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} className="border rounded p-3 bg-white dark:bg-black/30">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-start gap-2">
+          {/* ✅ 드래그 핸들 */}
+          <button
+            type="button"
+            className="px-2 py-1 rounded border text-xs cursor-grab active:cursor-grabbing"
+            title="드래그로 순서 변경"
+            disabled={props.loading}
+            {...attributes}
+            {...listeners}
+          >
+            ⠿
+          </button>
+
+          <div className="text-sm">
+            <div className="font-semibold">
+              {props.file.displayName || "(파일명 미입력)"}{" "}
+              {props.file.version ? <span className="text-xs opacity-70">({props.file.version})</span> : null}
+            </div>
+            <div className="text-xs opacity-70">
+              {props.file.originalName ? `원본: ${props.file.originalName}` : "업로드된 파일 없음"}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          {props.file.downloadUrl ? (
+            <a className="px-3 py-1 rounded border text-sm" href={props.file.downloadUrl} target="_blank" rel="noreferrer">
+              다운로드
+            </a>
+          ) : null}
+
+          <button type="button" className="px-3 py-1 rounded border text-sm" onClick={props.onEdit} disabled={props.loading}>
+            수정
+          </button>
+
+          <button type="button" className="px-3 py-1 rounded border text-sm" onClick={props.onCreateMod} disabled={props.loading}>
+            + Modification List 생성
+          </button>
+
+          <button type="button" className="px-3 py-1 rounded border text-sm" onClick={props.onDelete} disabled={props.loading}>
+            삭제
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-3">
+        <div className="text-xs font-semibold opacity-80 mb-1">Modification List</div>
+        {props.mods.length === 0 ? (
+          <div className="text-xs opacity-70">생성된 문서가 없습니다.</div>
+        ) : (
+          <div className="space-y-1">
+            {props.mods.map((m) => (
+              <div key={m.id} className="flex items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <span>📄 {m.id}.md</span>
+                  {m.downloadUrl ? (
+                    <a href={m.downloadUrl} target="_blank" rel="noreferrer" className="underline">
+                      다운로드
+                    </a>
+                  ) : null}
+                </div>
+                <button type="button" className="px-2 py-1 rounded border" onClick={() => props.onDeleteMod(m.id)} disabled={props.loading}>
+                  문서 삭제
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function ProjectDocumentPage() {
   const { auth, db, storage } = useMemo(() => getFirebaseClient(), []);
+
+  /** -----------------------------
+   * DnD sensors
+   * - 클릭으로 버튼이 눌리지 않도록 약간의 이동 후 드래그 시작(거리 6px)
+   * ------------------------------ */
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 6 },
+    })
+  );
 
   /** -----------------------------
    * Auth state
@@ -169,7 +354,7 @@ export default function ProjectDocumentPage() {
   // 카테고리 생성 입력값
   const [newCategoryNameByParent, setNewCategoryNameByParent] = useState<Record<string, string>>({});
 
-  // ✅ 카테고리명 편집값(인라인 수정용)
+  // 카테고리명 편집값
   const [nodeNameEdits, setNodeNameEdits] = useState<Record<string, string>>({});
 
   /** -----------------------------
@@ -204,7 +389,6 @@ export default function ProjectDocumentPage() {
         setNewCategoryNameByParent({});
         setNodeNameEdits({});
 
-        // 모달 초기화
         closeFileModal();
 
         return;
@@ -267,7 +451,8 @@ export default function ProjectDocumentPage() {
       map[f.nodeId].push(f);
     }
     for (const k of Object.keys(map)) {
-      map[k].sort((a, b) => (a.displayName + a.version).localeCompare(b.displayName + b.version));
+      // ✅ order 우선 정렬 (없으면 0으로 취급)
+      map[k].sort((a, b) => ((a.order ?? 0) - (b.order ?? 0)) || (a.displayName + a.version).localeCompare(b.displayName + b.version));
     }
     return map;
   }, [files]);
@@ -375,13 +560,12 @@ export default function ProjectDocumentPage() {
       const nList = [...nListRaw].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
       setNodes(nList);
 
-      // ✅ 카테고리명 edit state 초기화(없으면 채움)
+      // ✅ 카테고리명 edit state 초기화
       setNodeNameEdits((prev) => {
         const next = { ...prev };
         for (const n of nList) {
           if (n.type === "category" && next[n.id] == null) next[n.id] = n.name ?? "";
         }
-        // 삭제된 노드 정리
         for (const k of Object.keys(next)) {
           if (!nList.some((n) => n.id === k)) delete next[k];
         }
@@ -390,7 +574,8 @@ export default function ProjectDocumentPage() {
 
       const filesQ = query(collection(db, "project_document_files"), where("projectId", "==", projectId));
       const fSnap = await getDocs(filesQ);
-      setFiles(fSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as FileItem[]);
+      const fileList = fSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as FileItem[];
+      setFiles(fileList);
 
       const modsQ = query(collection(db, "project_document_mods"), where("projectId", "==", projectId));
       const mSnap = await getDocs(modsQ);
@@ -489,7 +674,7 @@ export default function ProjectDocumentPage() {
 
     setLoading(true);
     try {
-      const siblings = nodes.filter((n) => n.parentId === parentId);
+      const siblings = nodes.filter((n) => n.parentId === parentId && n.type === "category");
       const nextOrder = siblings.length ? Math.max(...siblings.map((s) => s.order ?? 0)) + 1 : 1;
 
       const nodeRef = await addDoc(collection(db, "project_document_nodes"), {
@@ -560,10 +745,42 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
-   * 파일 모달 open/close (메뉴관리 방식)
+   * ✅ 카테고리 드래그 정렬 저장
+   * - 같은 parentId의 형제 카테고리들 order 재부여
+   * ------------------------------ */
+  async function persistCategoryOrder(parentId: string, orderedNodeIds: string[]) {
+    if (!uid || !activeProjectId) return;
+
+    const batch = writeBatch(db);
+    orderedNodeIds.forEach((nodeId, idx) => {
+      // ✅ order는 1부터(루트는 0 유지)
+      batch.update(doc(db, "project_document_nodes", nodeId), { order: idx + 1 });
+    });
+
+    await batch.commit();
+    await writeAudit(activeProjectId, "CATEGORY_REORDER", { parentId, orderedNodeIds });
+  }
+
+  /** -----------------------------
+   * ✅ 파일 드래그 정렬 저장
+   * - 같은 nodeId의 파일들 order 재부여
+   * ------------------------------ */
+  async function persistFileOrder(nodeId: string, orderedFileIds: string[]) {
+    if (!uid || !activeProjectId) return;
+
+    const batch = writeBatch(db);
+    orderedFileIds.forEach((fileId, idx) => {
+      batch.update(doc(db, "project_document_files", fileId), { order: idx + 1 });
+    });
+
+    await batch.commit();
+    await writeAudit(activeProjectId, "FILE_REORDER", { nodeId, orderedFileIds });
+  }
+
+  /** -----------------------------
+   * 파일 모달 open/close
    * ------------------------------ */
   function openFileModalCreate(nodeId: string) {
-    // ✅ "등록"은 팝업에서 파일명/버전 저장 + 업로드까지
     setFileModalMode("create");
     setFileModalNodeId(nodeId);
     setFileModalFileId(null);
@@ -606,7 +823,9 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
-   * 파일 메타 저장 (팝업에서 저장 버튼)
+   * 파일 메타 저장(모달)
+   * - create 모드: 새 문서 생성 + order 자동부여
+   * - edit 모드: 메타 업데이트
    * ------------------------------ */
   async function saveFileMetaFromModal(): Promise<string | null> {
     if (!uid || !activeProjectId) {
@@ -625,13 +844,18 @@ export default function ProjectDocumentPage() {
 
     setLoading(true);
     try {
-      // create 모드: 파일 문서 생성
+      // create 모드: 문서 생성
       if (fileModalMode === "create" || !fileModalFileId) {
+        // ✅ 같은 카테고리 내 max order+1
+        const existing = files.filter((f) => f.nodeId === fileModalNodeId);
+        const nextOrder = existing.length ? Math.max(...existing.map((f) => f.order ?? 0)) + 1 : 1;
+
         const fileRef = await addDoc(collection(db, "project_document_files"), {
           projectId: activeProjectId,
           nodeId: fileModalNodeId,
           displayName: dn,
           version: ver,
+          order: nextOrder,
           originalName: "",
           storagePath: "",
           downloadUrl: "",
@@ -645,9 +869,9 @@ export default function ProjectDocumentPage() {
           nodeId: fileModalNodeId,
           displayName: dn,
           version: ver,
+          order: nextOrder,
         });
 
-        // 모달은 edit 상태로 전환(같은 팝업에서 업로드 가능)
         setFileModalMode("edit");
         setFileModalFileId(fileRef.id);
 
@@ -655,7 +879,7 @@ export default function ProjectDocumentPage() {
         return fileRef.id;
       }
 
-      // edit 모드: 메타 업데이트
+      // edit 모드: 업데이트
       await updateDoc(doc(db, "project_document_files", fileModalFileId), {
         displayName: dn,
         version: ver,
@@ -680,7 +904,7 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
-   * 파일 업로드 (팝업에서 업로드 버튼)
+   * 파일 업로드(모달)
    * - 업로드 전 메타 저장을 먼저 강제
    * ------------------------------ */
   async function uploadFileFromModal() {
@@ -695,20 +919,14 @@ export default function ProjectDocumentPage() {
       return;
     }
 
-    // ✅ 먼저 메타 저장(없으면 생성)
     const fileId = await saveFileMetaFromModal();
     if (!fileId) return;
 
-    const target = files.find((f) => f.id === fileId);
-    if (!target) {
-      // 저장 직후 load가 되지 않는 경우 대비
-      await loadProjectAll(activeProjectId);
-    }
-
     setLoading(true);
     try {
-      // 기존 업로드가 있으면 교체(기존 스토리지 삭제 시도)
       const current = files.find((f) => f.id === fileId);
+
+      // 기존 업로드가 있으면 교체(기존 스토리지 삭제 시도)
       if (current?.storagePath) {
         try {
           await deleteObject(ref(storage, current.storagePath));
@@ -868,12 +1086,100 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
+   * ✅ DnD 핸들러 - 카테고리(형제) 전용
+   * - 이 함수는 같은 parentId 컨테이너에서만 호출(컨테이너별 DndContext 사용)
+   * ------------------------------ */
+  async function onDragEndCategory(parentId: string, childCategoryNodes: TreeNode[], event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over) return;
+
+    // id는 "node:xxx" 형태
+    const activeId = String(active.id);
+    const overId = String(over.id);
+    if (activeId === overId) return;
+
+    // 실제 nodeId만 추출
+    const activeNodeId = activeId.replace("node:", "");
+    const overNodeId = overId.replace("node:", "");
+
+    const oldIndex = childCategoryNodes.findIndex((n) => n.id === activeNodeId);
+    const newIndex = childCategoryNodes.findIndex((n) => n.id === overNodeId);
+    if (oldIndex < 0 || newIndex < 0) return;
+
+    // ✅ UI 즉시 반영: nodes 상태를 재정렬
+    const reordered = arrayMove(childCategoryNodes, oldIndex, newIndex);
+    const reorderedIds = reordered.map((n) => n.id);
+
+    setNodes((prev) => {
+      // 기존 nodes에서 해당 parentId의 category 형제만 바꿔치기
+      const others = prev.filter((n) => !(n.parentId === parentId && n.type === "category"));
+      const targetSiblings = reordered.map((n, idx) => ({ ...n, order: idx + 1 }));
+      return [...others, ...targetSiblings].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    });
+
+    // ✅ DB 저장
+    try {
+      setLoading(true);
+      await persistCategoryOrder(parentId, reorderedIds);
+      await loadProjectAll(activeProjectId!);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /** -----------------------------
+   * ✅ DnD 핸들러 - 파일(같은 카테고리) 전용
+   * ------------------------------ */
+  async function onDragEndFile(nodeId: string, nodeFiles: FileItem[], event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over) return;
+
+    // id는 "file:xxx" 형태
+    const activeId = String(active.id);
+    const overId = String(over.id);
+    if (activeId === overId) return;
+
+    const activeFileId = activeId.replace("file:", "");
+    const overFileId = overId.replace("file:", "");
+
+    const oldIndex = nodeFiles.findIndex((f) => f.id === activeFileId);
+    const newIndex = nodeFiles.findIndex((f) => f.id === overFileId);
+    if (oldIndex < 0 || newIndex < 0) return;
+
+    const reordered = arrayMove(nodeFiles, oldIndex, newIndex);
+    const reorderedIds = reordered.map((f) => f.id);
+
+    // ✅ UI 즉시 반영
+    setFiles((prev) => {
+      const others = prev.filter((f) => f.nodeId !== nodeId);
+      const target = reordered.map((f, idx) => ({ ...f, order: idx + 1 }));
+      return [...others, ...target];
+    });
+
+    // ✅ DB 저장
+    try {
+      setLoading(true);
+      await persistFileOrder(nodeId, reorderedIds);
+      await loadProjectAll(activeProjectId!);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /** -----------------------------
    * UI - recursive render
+   * - 컨테이너(형제 리스트)마다 DndContext를 분리해
+   *   "형제끼리만" 드래그 되도록 안정적으로 구성
    * ------------------------------ */
   function renderNode(node: TreeNode, depth: number) {
     const childNodes = nodesByParent[node.id] ?? [];
+    const childCategories = childNodes.filter((n) => n.type === "category"); // project 아래는 카테고리만
     const nodeFiles = filesByNode[node.id] ?? [];
     const indent = Math.min(depth * 16, 64);
+
+    // ✅ DnD ids
+    const categoryDndIds = childCategories.map((n) => `node:${n.id}`);
+    const fileDndIds = nodeFiles.map((f) => `file:${f.id}`);
 
     return (
       <div key={node.id} className="border rounded-md p-3 mb-3 bg-white/50 dark:bg-black/20">
@@ -882,8 +1188,8 @@ export default function ProjectDocumentPage() {
             {node.type === "project" ? (
               <span className="text-sm font-semibold">📌 {node.name}</span>
             ) : (
-              <>
-                {/* ✅ "Category:" 제거 + 카테고리명 수정 가능 */}
+              // ✅ 카테고리(현재 노드 자체)는 기존처럼 인라인 수정 제공 (드래그는 "형제 리스트"에서만)
+              <div className="flex items-center gap-2">
                 <span className="text-sm font-semibold">📁</span>
                 <input
                   className="border rounded px-2 py-1 text-sm bg-transparent w-[260px]"
@@ -909,7 +1215,7 @@ export default function ProjectDocumentPage() {
                 >
                   삭제
                 </button>
-              </>
+              </div>
             )}
           </div>
 
@@ -934,13 +1240,7 @@ export default function ProjectDocumentPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="text-sm font-medium">📎 파일 관리</div>
 
-              {/* ✅ 메뉴관리 방식: 등록 버튼 → 팝업에서 파일명/버전 저장 + 업로드 */}
-              <button
-                type="button"
-                className="px-3 py-1 rounded border text-sm"
-                onClick={() => openFileModalCreate(node.id)}
-                disabled={loading}
-              >
+              <button type="button" className="px-3 py-1 rounded border text-sm" onClick={() => openFileModalCreate(node.id)} disabled={loading}>
                 + 파일 등록
               </button>
             </div>
@@ -948,77 +1248,91 @@ export default function ProjectDocumentPage() {
             {nodeFiles.length === 0 ? (
               <div className="text-sm opacity-70">등록된 파일이 없습니다. 우측의 “+ 파일 등록”으로 추가해 주세요.</div>
             ) : (
-              <div className="space-y-2">
-                {nodeFiles.map((f) => {
-                  const linkedMods = modsByFile[f.id] ?? [];
-                  return (
-                    <div key={f.id} className="border rounded p-3 bg-white dark:bg-black/30">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="text-sm">
-                          <div className="font-semibold">
-                            {f.displayName || "(파일명 미입력)"}{" "}
-                            {f.version ? <span className="text-xs opacity-70">({f.version})</span> : null}
-                          </div>
-                          <div className="text-xs opacity-70">
-                            {f.originalName ? `원본: ${f.originalName}` : "업로드된 파일 없음"}
-                          </div>
-                        </div>
-
-                        <div className="flex flex-wrap gap-2">
-                          {f.downloadUrl ? (
-                            <a className="px-3 py-1 rounded border text-sm" href={f.downloadUrl} target="_blank" rel="noreferrer">
-                              다운로드
-                            </a>
-                          ) : null}
-
-                          <button type="button" className="px-3 py-1 rounded border text-sm" onClick={() => openFileModalEdit(f)} disabled={loading}>
-                            수정
-                          </button>
-
-                          <button type="button" className="px-3 py-1 rounded border text-sm" onClick={() => handleCreateMod(f)} disabled={loading}>
-                            + Modification List 생성
-                          </button>
-
-                          <button type="button" className="px-3 py-1 rounded border text-sm" onClick={() => handleDeleteFile(f.id)} disabled={loading}>
-                            삭제
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="mt-3">
-                        <div className="text-xs font-semibold opacity-80 mb-1">Modification List</div>
-                        {linkedMods.length === 0 ? (
-                          <div className="text-xs opacity-70">생성된 문서가 없습니다.</div>
-                        ) : (
-                          <div className="space-y-1">
-                            {linkedMods.map((m) => (
-                              <div key={m.id} className="flex items-center justify-between gap-2 text-xs">
-                                <div className="flex items-center gap-2">
-                                  <span>📄 {m.id}.md</span>
-                                  {m.downloadUrl ? (
-                                    <a href={m.downloadUrl} target="_blank" rel="noreferrer" className="underline">
-                                      다운로드
-                                    </a>
-                                  ) : null}
-                                </div>
-                                <button type="button" className="px-2 py-1 rounded border" onClick={() => handleDeleteMod(m.id)} disabled={loading}>
-                                  문서 삭제
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              /**
+               * ✅ 파일 DnD 컨테이너(같은 카테고리 내에서만 정렬)
+               */
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={(e) => void onDragEndFile(node.id, nodeFiles, e)}
+              >
+                <SortableContext items={fileDndIds} strategy={verticalListSortingStrategy}>
+                  <div className="space-y-2">
+                    {nodeFiles.map((f) => (
+                      <SortableFileRow
+                        key={f.id}
+                        dndId={`file:${f.id}`}
+                        file={f}
+                        loading={loading}
+                        onEdit={() => openFileModalEdit(f)}
+                        onDelete={() => void handleDeleteFile(f.id)}
+                        onCreateMod={() => void handleCreateMod(f)}
+                        mods={modsByFile[f.id] ?? []}
+                        onDeleteMod={(modId) => void handleDeleteMod(modId)}
+                      />
+                    ))}
+                  </div>
+                </SortableContext>
+              </DndContext>
             )}
           </div>
         )}
 
-        {/* 자식 노드 */}
-        {childNodes.length > 0 && <div className="mt-3 space-y-3">{childNodes.map((c) => renderNode(c, depth + 1))}</div>}
+        {/* ✅ 자식 카테고리 리스트: 여기서 "형제끼리" DnD 정렬 */}
+        {childCategories.length > 0 && (
+          <div className="mt-3 space-y-3">
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragEnd={(e) => void onDragEndCategory(node.id, childCategories, e)}
+            >
+              <SortableContext items={categoryDndIds} strategy={verticalListSortingStrategy}>
+                <div className="space-y-3">
+                  {childCategories.map((c) => (
+                    <div key={c.id} className="border rounded-md p-3 bg-white/40 dark:bg-black/15">
+                      {/* ✅ 형제 리스트에서만 드래그 핸들 노출 */}
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2" style={{ paddingLeft: Math.min((depth + 1) * 16, 64) }}>
+                          <SortableCategoryRow
+                            dndId={`node:${c.id}`}
+                            node={c}
+                            loading={loading}
+                            nameValue={nodeNameEdits[c.id] ?? c.name ?? ""}
+                            onNameChange={(v) => setNodeNameEdits((prev) => ({ ...prev, [c.id]: v }))}
+                            onSave={() => void handleSaveCategoryName(c.id)}
+                            onDelete={() => void handleDeleteCategory(c.id)}
+                          />
+                        </div>
+
+                        {/* 하위 카테고리 생성 */}
+                        <div className="flex items-center gap-2">
+                          <input
+                            className="border rounded px-2 py-1 text-sm w-48 bg-transparent"
+                            placeholder="하위 카테고리명"
+                            value={newCategoryNameByParent[c.id] ?? ""}
+                            onChange={(e) => setNewCategoryNameByParent((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                            disabled={loading}
+                          />
+                          <button
+                            type="button"
+                            className="px-3 py-1 rounded border text-sm"
+                            onClick={() => void handleAddCategory(c.id)}
+                            disabled={loading}
+                          >
+                            + 카테고리 생성
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* ✅ 재귀 렌더(하위 트리) */}
+                      <div className="mt-3">{renderNode(c, depth + 1)}</div>
+                    </div>
+                  ))}
+                </div>
+              </SortableContext>
+            </DndContext>
+          </div>
+        )}
       </div>
     );
   }
@@ -1069,7 +1383,7 @@ export default function ProjectDocumentPage() {
                 onChange={(e) => setProjectName(e.target.value)}
                 disabled={loading}
               />
-              <button type="button" className="px-4 py-2 rounded border" onClick={handleCreateProject} disabled={loading}>
+              <button type="button" className="px-4 py-2 rounded border" onClick={() => void handleCreateProject()} disabled={loading}>
                 저장
               </button>
             </div>
@@ -1108,7 +1422,7 @@ export default function ProjectDocumentPage() {
               </button>
             </div>
 
-            {/* 파일명/버전 입력 */}
+            {/* 파일명/버전 */}
             <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
               <div className="md:col-span-4 flex flex-col gap-1">
                 <label className="text-xs opacity-70">파일명</label>
@@ -1161,10 +1475,10 @@ export default function ProjectDocumentPage() {
 
             {/* 버튼 */}
             <div className="flex gap-2 mt-4">
-              <button type="button" className="px-4 py-2 rounded border text-sm" onClick={saveFileMetaFromModal} disabled={loading}>
+              <button type="button" className="px-4 py-2 rounded border text-sm" onClick={() => void saveFileMetaFromModal()} disabled={loading}>
                 저장
               </button>
-              <button type="button" className="px-4 py-2 rounded border text-sm" onClick={uploadFileFromModal} disabled={loading}>
+              <button type="button" className="px-4 py-2 rounded border text-sm" onClick={() => void uploadFileFromModal()} disabled={loading}>
                 업로드
               </button>
               <button type="button" className="px-4 py-2 rounded border text-sm" onClick={closeFileModal} disabled={loading}>
