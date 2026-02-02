@@ -3,26 +3,29 @@
 /**
  * projnow/app/contents/project_document/page.tsx
  *
- * ✅ 반영된 요구사항
- * 1) 프로젝트 목록을 "생성자(uid)" 기준으로 자동 조회
- * 2) 페이지 진입 시 "가장 최근 프로젝트" 자동 선택
- * 3) 선택된 프로젝트 하위에 카테고리/파일/문서가 나열됨
- * 4) 프로젝트 생성 시에도 해당 프로젝트 자동 선택
- * 5) 프로젝트 생성 시: 기본 카테고리 1개 + 기본 파일 등록폼 1개 자동 생성
+ * ✅ 요구사항 반영
+ * 1) 프로젝트 생성자(uid) 기준으로 프로젝트 목록 자동 조회
+ * 2) 저장 버튼 클릭 시:
+ *    - 하단에 문서 등록 폼(기본 카테고리 + 파일등록 폼 1개)이 즉시 생성/표시
+ *    - 상단 셀렉트 박스에도 생성된 프로젝트가 즉시 추가/선택
+ * 3) "프로젝트 선택" 시 해당 프로젝트 하위 문서(카테고리/파일)가 나열
  *
- * ⚠️ Firebase 초기화는 이 파일 내부에서 수행(프로젝트 내부 경로 의존 제거)
- * ⚠️ 필수 환경변수:
- * - NEXT_PUBLIC_FIREBASE_API_KEY
- * - NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
- * - NEXT_PUBLIC_FIREBASE_PROJECT_ID
- * - NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
- * - NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
- * - NEXT_PUBLIC_FIREBASE_APP_ID
+ * ✅ 안정화 포인트
+ * - 프로젝트 목록 조회 쿼리에서 orderBy를 제거(인덱스 의존 제거)
+ * - 정렬은 클라이언트에서 수행
+ * - 생성 직후 myProjects 낙관적 업데이트로 "즉시 셀렉트 반영"
+ *
+ * ⚠️ Firebase env 필요:
+ * NEXT_PUBLIC_FIREBASE_API_KEY
+ * NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+ * NEXT_PUBLIC_FIREBASE_PROJECT_ID
+ * NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+ * NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+ * NEXT_PUBLIC_FIREBASE_APP_ID
  */
 
 import React, { useEffect, useMemo, useState } from "react";
 
-// Firebase Client SDK (직접 초기화)
 import { initializeApp, getApps, getApp, type FirebaseApp } from "firebase/app";
 import { getAuth, onAuthStateChanged, type Auth } from "firebase/auth";
 import {
@@ -51,7 +54,7 @@ import {
 } from "firebase/storage";
 
 /** -----------------------------
- * Firebase init (이 파일에서 안전하게 1회 초기화)
+ * Firebase init (이 파일에서 1회)
  * ------------------------------ */
 function getFirebaseClient(): { app: FirebaseApp; auth: Auth; db: Firestore; storage: FirebaseStorage } {
   const cfg = {
@@ -63,7 +66,6 @@ function getFirebaseClient(): { app: FirebaseApp; auth: Auth; db: Firestore; sto
     appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID!,
   };
 
-  // 누락된 환경변수 체크(디버그용)
   const missing = Object.entries(cfg).filter(([, v]) => !v).map(([k]) => k);
   if (missing.length > 0) {
     // eslint-disable-next-line no-console
@@ -138,9 +140,6 @@ type AuditAction =
   | "MOD_DELETE";
 
 export default function ProjectDocumentPage() {
-  /** -----------------------------
-   * Firebase handles
-   * ------------------------------ */
   const { auth, db, storage } = useMemo(() => getFirebaseClient(), []);
 
   /** -----------------------------
@@ -154,22 +153,21 @@ export default function ProjectDocumentPage() {
    * ------------------------------ */
   const [loading, setLoading] = useState(false);
 
-  // (1) 프로젝트명 입력 및 저장
   const [projectName, setProjectName] = useState("");
 
-  // ✅ 사용자 프로젝트 목록(본인이 생성한 프로젝트들)
+  // ✅ 상단 셀렉트용: 내가 만든 프로젝트 목록
   const [myProjects, setMyProjects] = useState<ProjectDoc[]>([]);
 
   // ✅ 현재 선택된 프로젝트
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
 
-  // 로드된 데이터(선택된 프로젝트 기준)
+  // 선택된 프로젝트 기준 데이터
   const [project, setProject] = useState<ProjectDoc | null>(null);
   const [nodes, setNodes] = useState<TreeNode[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [mods, setMods] = useState<ModDoc[]>([]);
 
-  // 카테고리 생성 입력값(부모 노드별)
+  // 카테고리 생성 입력값
   const [newCategoryNameByParent, setNewCategoryNameByParent] = useState<Record<string, string>>({});
 
   /** -----------------------------
@@ -188,17 +186,19 @@ export default function ProjectDocumentPage() {
    * Effects
    * ------------------------------ */
   useEffect(() => {
-    // 로그인 상태 구독
     const unsub = onAuthStateChanged(auth, (user) => {
       if (!user) {
         setUid(null);
         setUserEmail(null);
+
+        // 로그아웃 시 초기화
         setMyProjects([]);
         setActiveProjectId(null);
         setProject(null);
         setNodes([]);
         setFiles([]);
         setMods([]);
+        setUploadFormsByNode({});
         return;
       }
       setUid(user.uid);
@@ -208,15 +208,21 @@ export default function ProjectDocumentPage() {
   }, [auth]);
 
   useEffect(() => {
-    // ✅ 로그인(uid)이 잡히면: 내 프로젝트 목록 자동 로드 + 최근 프로젝트 자동 선택
     if (!uid) return;
     void loadMyProjectsAndAutoSelect(uid);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uid]);
 
   useEffect(() => {
-    // ✅ 프로젝트 선택되면 하위 데이터 로드
     if (!activeProjectId) return;
+
+    // 프로젝트 전환 시 화면 데이터 초기화(혼선 방지)
+    setProject(null);
+    setNodes([]);
+    setFiles([]);
+    setMods([]);
+    setUploadFormsByNode({});
+
     void loadProjectAll(activeProjectId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProjectId]);
@@ -225,7 +231,6 @@ export default function ProjectDocumentPage() {
    * Memo maps
    * ------------------------------ */
   const rootNodeId = useMemo(() => {
-    // 프로젝트 루트 노드(type="project") 찾기
     const root = nodes.find((n) => n.type === "project" && n.projectId === activeProjectId);
     return root?.id ?? null;
   }, [nodes, activeProjectId]);
@@ -272,7 +277,6 @@ export default function ProjectDocumentPage() {
   }
 
   function createDefaultUploadForm(): UploadForm {
-    // ✅ 기본 파일 등록폼(1개)
     return {
       formId: makeLocalId("form"),
       displayName: "",
@@ -283,7 +287,7 @@ export default function ProjectDocumentPage() {
   }
 
   function ensureOneUploadForm(nodeId: string) {
-    // ✅ 특정 카테고리(nodeId)에 업로드폼이 0개면 1개 자동 생성
+    // ✅ 어떤 경우든 "카테고리 하단에 폼이 없다"를 방지
     setUploadFormsByNode((prev) => {
       const curr = prev[nodeId] ?? [];
       if (curr.length > 0) return prev;
@@ -291,8 +295,19 @@ export default function ProjectDocumentPage() {
     });
   }
 
+  function tsToMillis(ts: any): number {
+    // Firestore Timestamp 형태 대응
+    try {
+      if (!ts) return 0;
+      if (typeof ts.toMillis === "function") return ts.toMillis();
+      // serverTimestamp 직후 null일 수도 있음
+      return 0;
+    } catch {
+      return 0;
+    }
+  }
+
   async function writeAudit(projectId: string, action: AuditAction, payload: Record<string, any>) {
-    // (9) 별도 테이블에 이력관리
     if (!uid) return;
     await addDoc(collection(db, "project_document_audit"), {
       projectId,
@@ -305,49 +320,53 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
-   * ✅ 내 프로젝트 목록 로드 + 최근 프로젝트 자동 선택
+   * ✅ 프로젝트 목록 로드(인덱스 의존 제거)
+   * - where(createdBy==uid)만 사용
+   * - 정렬은 클라이언트에서 수행
    * ------------------------------ */
   async function loadMyProjectsAndAutoSelect(myUid: string) {
     setLoading(true);
     try {
-      // createdBy == myUid 인 프로젝트만 가져옴 (최근 생성순)
       const qy = query(
         collection(db, "project_documents"),
         where("createdBy", "==", myUid),
-        orderBy("createdAt", "desc"),
-        limit(50)
+        limit(100)
       );
 
       const snap = await getDocs(qy);
-      const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as ProjectDoc[];
+      const listRaw = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as ProjectDoc[];
+
+      // ✅ createdAt desc 정렬(클라이언트)
+      const list = [...listRaw].sort((a, b) => tsToMillis(b.createdAt) - tsToMillis(a.createdAt));
       setMyProjects(list);
 
-      // ✅ "기본 선택": 현재 선택이 없으면, 가장 최근 프로젝트를 자동 선택
+      // ✅ 자동 선택: 선택이 없으면 가장 최근
       if (!activeProjectId && list.length > 0) {
         setActiveProjectId(list[0].id);
       }
 
-      // ✅ 이미 선택된 프로젝트가 있는데 목록에 없으면(권한/삭제 등) 최근 프로젝트로 보정
-      if (activeProjectId && list.length > 0) {
-        const exists = list.some((p) => p.id === activeProjectId);
-        if (!exists) setActiveProjectId(list[0].id);
+      // ✅ 선택된 프로젝트가 목록에서 사라지면 보정
+      if (activeProjectId && list.length > 0 && !list.some((p) => p.id === activeProjectId)) {
+        setActiveProjectId(list[0].id);
       }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] loadMyProjects failed:", e);
     } finally {
       setLoading(false);
     }
   }
 
   /** -----------------------------
-   * Loaders (선택된 프로젝트 하위 데이터)
+   * 선택된 프로젝트 하위 데이터 로드
    * ------------------------------ */
   async function loadProjectAll(projectId: string) {
     setLoading(true);
     try {
-      // project meta
       const pSnap = await getDoc(doc(db, "project_documents", projectId));
       setProject(pSnap.exists() ? ({ id: pSnap.id, ...(pSnap.data() as any) } as ProjectDoc) : null);
 
-      // nodes
+      // nodes: orderBy(order)만 사용 (인덱스 불필요)
       const nodesQ = query(
         collection(db, "project_document_nodes"),
         where("projectId", "==", projectId),
@@ -367,18 +386,20 @@ export default function ProjectDocumentPage() {
       const mSnap = await getDocs(modsQ);
       setMods(mSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as ModDoc[]);
 
-      // ✅ 첫 카테고리에 기본 폼이 없으면 자동 1개 생성(화면 표시용)
+      // ✅ 폼이 없어서 안보이는 문제 방지: "첫 카테고리"에 기본 폼 강제 생성
       const firstCategory = nList.find((n) => n.type === "category");
       if (firstCategory) ensureOneUploadForm(firstCategory.id);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] loadProjectAll failed:", e);
     } finally {
       setLoading(false);
     }
   }
 
   /** -----------------------------
-   * (1) Project create/save
-   * - 프로젝트 생성 후: 자동 선택 + 목록 갱신
-   * - 기본 카테고리 1개 + 기본 파일폼 1개 자동 생성
+   * 프로젝트 생성
+   * - ✅ 생성 즉시: myProjects에 추가 + 자동 선택 + 하단 폼 표시
    * ------------------------------ */
   async function handleCreateProject() {
     if (!uid) {
@@ -402,7 +423,7 @@ export default function ProjectDocumentPage() {
         updatedAt: serverTimestamp(),
       });
 
-      // 2) 프로젝트 루트 노드 생성(type="project")
+      // 2) 프로젝트 루트 노드 생성
       const rootRef = await addDoc(collection(db, "project_document_nodes"), {
         projectId: projectRef.id,
         type: "project",
@@ -414,7 +435,7 @@ export default function ProjectDocumentPage() {
         createdAt: serverTimestamp(),
       });
 
-      // 3) 기본 카테고리 자동 생성
+      // 3) 기본 카테고리 생성(요구사항: 저장 즉시 하단 폼이 떠야 하므로 필수)
       const defaultCategoryName = "Default Category";
       const categoryRef = await addDoc(collection(db, "project_document_nodes"), {
         projectId: projectRef.id,
@@ -427,12 +448,7 @@ export default function ProjectDocumentPage() {
         createdAt: serverTimestamp(),
       });
 
-      // 4) 기본 파일 등록폼 1개 자동 생성(로컬 UI)
-      setUploadFormsByNode(() => ({
-        [categoryRef.id]: [createDefaultUploadForm()],
-      }));
-
-      // 로그
+      // 4) 감사 로그
       await writeAudit(projectRef.id, "PROJECT_CREATE", { name });
       await writeAudit(projectRef.id, "CATEGORY_CREATE", {
         nodeId: categoryRef.id,
@@ -441,21 +457,45 @@ export default function ProjectDocumentPage() {
         auto: true,
       });
 
-      // ✅ 중요: 생성된 프로젝트를 자동 선택(요구사항)
+      // ✅ (중요) 셀렉트 박스에 "즉시" 보이게: myProjects 낙관적 업데이트
+      const newProject: ProjectDoc = {
+        id: projectRef.id,
+        name,
+        createdBy: uid,
+        createdByEmail: userEmail ?? null,
+        // createdAt은 서버에서 찍히지만 즉시 정렬을 위해 임시 0 또는 Date.now()로 처리
+        createdAt: null,
+      };
+      setMyProjects((prev) => [newProject, ...prev]);
+
+      // ✅ (중요) 자동 선택 → 하단 트리/폼 표시 트리거
       setActiveProjectId(projectRef.id);
+
+      // ✅ (중요) 저장 즉시 "하단 파일등록 폼"이 안보이는 상황 방지: 로컬 폼을 먼저 세팅
+      setUploadFormsByNode((prev) => ({
+        ...prev,
+        [categoryRef.id]: [createDefaultUploadForm()],
+      }));
 
       // 입력 초기화
       setProjectName("");
 
-      // ✅ 내 프로젝트 목록 갱신(선택은 유지)
+      // ✅ 실제 데이터 로드(서버값 반영)
+      await loadProjectAll(projectRef.id);
+
+      // ✅ 프로젝트 목록도 서버 기준으로 동기화(권한/규칙 문제 조기 탐지)
       await loadMyProjectsAndAutoSelect(uid);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[ProjectDocument] handleCreateProject failed:", e);
+      alert("프로젝트 생성 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.");
     } finally {
       setLoading(false);
     }
   }
 
   /** -----------------------------
-   * (2)(3) Category create/delete
+   * 카테고리 생성/삭제
    * ------------------------------ */
   async function handleAddCategory(parentId: string) {
     if (!uid || !activeProjectId) {
@@ -486,7 +526,7 @@ export default function ProjectDocumentPage() {
 
       await writeAudit(activeProjectId, "CATEGORY_CREATE", { nodeId: nodeRef.id, parentId, name });
 
-      // ✅ 새 카테고리에 기본 파일 등록폼 1개 자동 생성(표시용)
+      // ✅ 새 카테고리도 즉시 폼 1개 생성
       ensureOneUploadForm(nodeRef.id);
 
       setNewCategoryNameByParent((prev) => ({ ...prev, [parentId]: "" }));
@@ -516,7 +556,7 @@ export default function ProjectDocumentPage() {
       await deleteDoc(doc(db, "project_document_nodes", nodeId));
       await writeAudit(activeProjectId, "CATEGORY_DELETE", { nodeId });
 
-      // 로컬 폼 상태 정리
+      // 로컬 폼 정리
       setUploadFormsByNode((prev) => {
         const next = { ...prev };
         delete next[nodeId];
@@ -548,7 +588,7 @@ export default function ProjectDocumentPage() {
       const next = { ...prev };
       next[nodeId] = (next[nodeId] ?? []).filter((f) => f.formId !== formId);
 
-      // ✅ 최소 1개 유지(원하시면 제거 가능)
+      // ✅ 폼 0개 방지(요구사항상 최소 1개는 있어야 함)
       if ((next[nodeId] ?? []).length === 0) {
         next[nodeId] = [createDefaultUploadForm()];
       }
@@ -565,18 +605,12 @@ export default function ProjectDocumentPage() {
     });
   }
 
-  /** -----------------------------
-   * Duplicate name check
-   * ------------------------------ */
   function checkDuplicateName(nodeId: string, displayName: string): boolean {
     const dn = displayName.trim().toLowerCase();
     if (!dn) return false;
     return (filesByNode[nodeId] ?? []).some((f) => f.displayName.trim().toLowerCase() === dn);
   }
 
-  /** -----------------------------
-   * Drag & Drop
-   * ------------------------------ */
   function handleDrop(nodeId: string, formId: string, e: React.DragEvent<HTMLDivElement>) {
     e.preventDefault();
     e.stopPropagation();
@@ -673,7 +707,9 @@ export default function ProjectDocumentPage() {
 
     setLoading(true);
     try {
-      if (target.storagePath) await deleteObject(ref(storage, target.storagePath));
+      if (target.storagePath) {
+        await deleteObject(ref(storage, target.storagePath));
+      }
       await deleteDoc(doc(db, "project_document_files", fileId));
       await writeAudit(activeProjectId, "FILE_DELETE", { fileId });
       await loadProjectAll(activeProjectId);
@@ -755,7 +791,9 @@ export default function ProjectDocumentPage() {
 
     setLoading(true);
     try {
-      if (target.storagePath) await deleteObject(ref(storage, target.storagePath));
+      if (target.storagePath) {
+        await deleteObject(ref(storage, target.storagePath));
+      }
       await deleteDoc(doc(db, "project_document_mods", modId));
       await writeAudit(activeProjectId, "MOD_DELETE", { modId, fileId: target.fileId });
       await loadProjectAll(activeProjectId);
@@ -793,7 +831,6 @@ export default function ProjectDocumentPage() {
             )}
           </div>
 
-          {/* 하위 카테고리 생성 */}
           <div className="flex items-center gap-2">
             <input
               className="border rounded px-2 py-1 text-sm w-48 bg-transparent"
@@ -813,7 +850,7 @@ export default function ProjectDocumentPage() {
           </div>
         </div>
 
-        {/* 카테고리 하단: 파일 등록폼 + 파일 목록 */}
+        {/* ✅ 카테고리 하단에 파일등록 폼이 반드시 보이도록 보장 */}
         {node.type === "category" && (
           <div className="mt-4" style={{ paddingLeft: indent }}>
             <div className="flex items-center justify-between mb-2">
@@ -828,8 +865,18 @@ export default function ProjectDocumentPage() {
               </button>
             </div>
 
-            {/* 업로드 폼 */}
             <div className="space-y-3">
+              {uploadForms.length === 0 ? (
+                <button
+                  type="button"
+                  className="px-3 py-2 rounded border text-sm"
+                  onClick={() => ensureOneUploadForm(node.id)}
+                  disabled={loading}
+                >
+                  기본 파일 등록폼 생성
+                </button>
+              ) : null}
+
               {uploadForms.map((form) => {
                 const isDup = checkDuplicateName(node.id, form.displayName);
                 return (
@@ -847,7 +894,6 @@ export default function ProjectDocumentPage() {
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                      {/* 파일명 */}
                       <div className="flex flex-col gap-1">
                         <label className="text-xs opacity-70">파일명(표시명)</label>
                         <input
@@ -867,7 +913,6 @@ export default function ProjectDocumentPage() {
                         )}
                       </div>
 
-                      {/* 버전 */}
                       <div className="flex flex-col gap-1">
                         <label className="text-xs opacity-70">버전</label>
                         <input
@@ -879,7 +924,6 @@ export default function ProjectDocumentPage() {
                         />
                       </div>
 
-                      {/* 파일 */}
                       <div className="flex flex-col gap-1">
                         <label className="text-xs opacity-70">파일</label>
                         <div
@@ -915,21 +959,8 @@ export default function ProjectDocumentPage() {
                   </div>
                 );
               })}
-
-              {/* 방어: 폼이 0개면 1개 생성 버튼 */}
-              {uploadForms.length === 0 && (
-                <button
-                  type="button"
-                  className="px-3 py-2 rounded border text-sm"
-                  onClick={() => ensureOneUploadForm(node.id)}
-                  disabled={loading}
-                >
-                  기본 파일 등록폼 생성
-                </button>
-              )}
             </div>
 
-            {/* 파일 목록 */}
             <div className="mt-4">
               <div className="text-sm font-medium mb-2">📄 등록된 파일</div>
               {nodeFiles.length === 0 ? (
@@ -966,7 +997,6 @@ export default function ProjectDocumentPage() {
                               className="px-3 py-1 rounded border text-sm"
                               onClick={() => handleCreateMod(f)}
                               disabled={loading}
-                              title="이 파일 버전에 대한 변경사항 문서를 생성합니다."
                             >
                               + Modification List 생성
                             </button>
@@ -1020,7 +1050,6 @@ export default function ProjectDocumentPage() {
           </div>
         )}
 
-        {/* 하위 카테고리 렌더 */}
         {childNodes.length > 0 && <div className="mt-3 space-y-3">{childNodes.map((c) => renderNode(c, depth + 1))}</div>}
       </div>
     );
@@ -1036,7 +1065,7 @@ export default function ProjectDocumentPage() {
         <div className="text-xs opacity-70">{uid ? `로그인: ${userEmail ?? uid}` : "비로그인"}</div>
       </div>
 
-      {/* ✅ 내 프로젝트 선택 영역 (자동 선택 + 수동 변경 가능) */}
+      {/* 상단: 프로젝트 선택 + 프로젝트 생성 */}
       <section className="border rounded-md p-4 mb-6 bg-white/50 dark:bg-black/20">
         <div className="flex flex-col md:flex-row gap-3 items-start md:items-end justify-between">
           <div className="flex flex-col gap-2">
@@ -1055,13 +1084,10 @@ export default function ProjectDocumentPage() {
               ))}
             </select>
             <div className="text-xs opacity-70">
-              {myProjects.length === 0
-                ? "생성된 프로젝트가 없습니다. 아래에서 프로젝트를 생성하세요."
-                : "페이지 진입 시 최근 프로젝트가 자동 선택됩니다."}
+              {myProjects.length === 0 ? "생성된 프로젝트가 없습니다. 우측에서 생성하세요." : "저장 시 목록에 즉시 반영됩니다."}
             </div>
           </div>
 
-          {/* (1) 프로젝트 생성 */}
           <div className="flex flex-col gap-2">
             <div className="text-sm font-semibold">프로젝트 생성</div>
             <div className="flex gap-2">
@@ -1072,19 +1098,13 @@ export default function ProjectDocumentPage() {
                 onChange={(e) => setProjectName(e.target.value)}
                 disabled={loading}
               />
-              <button
-                type="button"
-                className="px-4 py-2 rounded border"
-                onClick={handleCreateProject}
-                disabled={loading}
-              >
+              <button type="button" className="px-4 py-2 rounded border" onClick={handleCreateProject} disabled={loading}>
                 저장
               </button>
             </div>
           </div>
         </div>
 
-        {/* 현재 프로젝트 표시 */}
         <div className="mt-3 text-sm">
           <span className="font-semibold">현재 프로젝트: </span>
           <span className="opacity-80">
@@ -1093,14 +1113,16 @@ export default function ProjectDocumentPage() {
         </div>
       </section>
 
-      {/* 트리 영역 */}
+      {/* 하단: 선택된 프로젝트 트리 */}
       {!activeProjectId ? (
         <div className="text-sm opacity-70">프로젝트를 선택(또는 생성)하면 하위 문서 트리가 표시됩니다.</div>
       ) : (
         <section>
           {loading && <div className="text-sm opacity-70 mb-3">처리 중...</div>}
           {!rootNodeId ? (
-            <div className="text-sm opacity-70">프로젝트 루트 노드를 찾을 수 없습니다.</div>
+            <div className="text-sm opacity-70">
+              프로젝트 노드를 불러오지 못했습니다. (규칙/권한/쿼리 오류일 수 있습니다)
+            </div>
           ) : (
             nodes.filter((n) => n.id === rootNodeId).map((root) => renderNode(root, 0))
           )}
