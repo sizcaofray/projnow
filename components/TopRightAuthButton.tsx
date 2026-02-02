@@ -1,9 +1,10 @@
 "use client";
 
 // components/TopRightAuthButton.tsx
-// ✅ [ADD] Google 로그인 성공 시 users/{uid}에 name/email 저장(merge)
-// - 기존 UI/기능은 유지하고, DB 저장 로직만 추가합니다.
-// - displayName이 없으면 email 앞부분을 name으로 대체합니다.
+// ✅ Google 로그인 성공 시 users/{uid}에 name/email 저장(merge)
+// ✅ 단, "기존 유저"의 name이 이미 있으면 덮어쓰지 않음
+// ✅ name이 비어있을 때만 displayName(or email prefix)로 채움
+// ✅ email도 비어있을 때만 채움 (기존 값 유지)
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
@@ -15,19 +16,21 @@ import { getFirebaseAuth } from "@/lib/firebase/client";
 import { db } from "@/lib/firebase/firebase";
 
 type UiConfig = {
-  headerSubscribeVisible: boolean; // 구독 버튼 보이기/숨기기
-  headerSubscribeEnabled: boolean; // 구독 버튼 활성/비활성(단, 로그인되어야 클릭 가능)
+  headerSubscribeVisible: boolean;
+  headerSubscribeEnabled: boolean;
 };
 
-// ✅ 이메일 정규화(초대 기능 where(email==)에도 유리)
 function normalizeEmail(v: string) {
   return (v ?? "").trim().toLowerCase();
 }
 
-// ✅ displayName이 없을 때 대체 이름
 function fallbackNameFromEmail(email: string) {
   const at = email.indexOf("@");
   return at > 0 ? email.slice(0, at) : email;
+}
+
+function safeTrim(v: any) {
+  return typeof v === "string" ? v.trim() : "";
 }
 
 export default function TopRightAuthButton() {
@@ -35,13 +38,11 @@ export default function TopRightAuthButton() {
   const [authBusy, setAuthBusy] = useState(false);
   const [actionError, setActionError] = useState("");
 
-  // ✅ 전역 UI 설정(기본값: 보이기+활성)
   const [ui, setUi] = useState<UiConfig>({
     headerSubscribeVisible: true,
     headerSubscribeEnabled: true,
   });
 
-  // ✅ Auth 싱글톤 참조
   const auth = useMemo(() => {
     try {
       return getFirebaseAuth();
@@ -50,10 +51,8 @@ export default function TopRightAuthButton() {
     }
   }, []);
 
-  // ✅ 전역 설정 문서 구독 (appConfig/ui)
   useEffect(() => {
     const ref = doc(db, "appConfig", "ui");
-
     const unsub = onSnapshot(
       ref,
       (snap) => {
@@ -82,31 +81,56 @@ export default function TopRightAuthButton() {
     return () => unsub();
   }, []);
 
-  // ✅ [ADD] users/{uid} 업서트(merge)
-  const upsertUserProfile = async (uid: string, emailRaw: string, displayNameRaw: string | null) => {
-    const email = normalizeEmail(emailRaw);
-    const name = (displayNameRaw ?? "").trim() || fallbackNameFromEmail(email);
+  /**
+   * ✅ [핵심] 기존 유저의 name이 비어있을 때만 채움
+   * - name: 기존 값이 있으면 유지 (덮어쓰기 금지)
+   * - email: 기존 값이 있으면 유지
+   * - updatedAt: 항상 갱신
+   * - createdAt: 문서가 없을 때만 설정
+   */
+  const upsertUserProfileIfEmpty = async (
+    uid: string,
+    emailRaw: string,
+    displayNameRaw: string | null
+  ) => {
+    const emailFromAuth = normalizeEmail(emailRaw);
+    const nameFromAuth =
+      safeTrim(displayNameRaw) || fallbackNameFromEmail(emailFromAuth);
 
     const userRef = doc(db, "users", uid);
-
-    // createdAt은 최초 1회만 기록하기 위해 존재 여부 확인
     const snap = await getDoc(userRef);
 
+    // 기본 payload (공통)
     const payload: any = {
-      email,
-      name,
       updatedAt: serverTimestamp(),
     };
 
     if (!snap.exists()) {
+      // ✅ 신규 유저: name/email 모두 저장
+      payload.email = emailFromAuth;
+      payload.name = nameFromAuth;
       payload.createdAt = serverTimestamp();
+
+      await setDoc(userRef, payload, { merge: true });
+      return;
     }
 
-    // role, isSubscribed 등 기존 필드 보존
+    // ✅ 기존 유저: 비어있을 때만 채움
+    const data = snap.data() as any;
+    const existingName = safeTrim(data?.name);
+    const existingEmail = normalizeEmail(data?.email ?? "");
+
+    if (!existingName) {
+      payload.name = nameFromAuth;
+    }
+    if (!existingEmail && emailFromAuth) {
+      payload.email = emailFromAuth;
+    }
+
+    // name/email 둘 다 이미 있으면 updatedAt만 갱신됩니다.
     await setDoc(userRef, payload, { merge: true });
   };
 
-  /** Google 로그인 */
   const handleLogin = async () => {
     try {
       setActionError("");
@@ -118,13 +142,12 @@ export default function TopRightAuthButton() {
       setAuthBusy(true);
       const provider = new GoogleAuthProvider();
 
-      // ✅ 로그인
       const cred = await signInWithPopup(auth, provider);
 
-      // ✅ [ADD] 로그인 성공 직후 name/email 저장
+      // ✅ 로그인 성공 직후: 기존 유저라도 name 비어있으면 채움
       const u = cred.user;
       if (u?.uid) {
-        await upsertUserProfile(u.uid, u.email ?? "", u.displayName ?? null);
+        await upsertUserProfileIfEmpty(u.uid, u.email ?? "", u.displayName ?? null);
       }
     } catch (e: any) {
       setActionError(e?.message ?? "로그인 중 오류가 발생했습니다.");
@@ -133,7 +156,6 @@ export default function TopRightAuthButton() {
     }
   };
 
-  /** 로그아웃 */
   const handleLogout = async () => {
     try {
       setActionError("");
