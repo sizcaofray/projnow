@@ -1,14 +1,15 @@
 // lib/firebase/firebase.ts
-// Firebase 초기화 및 Firestore(db) export
-// - app/user/page.tsx 등에서 db를 import 해서 사용합니다.
+// Firebase 초기화 및 Firestore(db), Auth(auth) export
+// - 기존에 db만 쓰던 코드 영향 최소화를 위해 db export는 유지합니다.
+// - Project 생성/관리 기능에서 auth가 필요하므로 auth도 함께 export 합니다.
 // - NEXT_PUBLIC_FIREBASE_* 환경변수는 Vercel/로컬 모두에 설정되어 있어야 합니다.
 
-import { initializeApp, getApps } from "firebase/app";
+import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
+import { getAuth } from "firebase/auth";
 
 // Firebase 설정 (환경변수 기반)
-// ⚠️ 아래 환경변수 이름은 일반적인 Firebase 웹 설정 키입니다.
-//    프로젝트에 이미 사용 중인 키 이름이 다르면 그 이름에 맞춰 변경해 주세요.
+// ⚠️ 환경변수 이름은 현재 파일에 있던 형태를 그대로 유지합니다.
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY, // Firebase API Key
   authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN, // Auth Domain
@@ -19,7 +20,11 @@ const firebaseConfig = {
 };
 
 // 이미 초기화된 앱이 있으면 재사용(핫리로드/중복초기화 방지)
-const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
+const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
-// Firestore 인스턴스 export
+// Firestore/Auth 인스턴스 export
 export const db = getFirestore(app);
+export const auth = getAuth(app);
+
+// (필요시) app도 외부에서 쓸 수 있도록 export
+export { app };
