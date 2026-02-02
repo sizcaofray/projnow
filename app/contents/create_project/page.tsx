@@ -1,18 +1,20 @@
 "use client";
 
 // app/contents/create_project/page.tsx
-// Project(최상위 단위) 생성/수정/삭제 UI
-// ✅ FIX: Firestore transaction 규칙(모든 read 후 write) 준수하도록 tx.get 순서 수정
-// - UID는 PRJ_000001 형태로 자동 생성됩니다.
-// - 삭제는 confirm으로 재확인합니다.
-// - 관리자 전용 메뉴(규칙/라우팅 가드는 별도)
+// Project(최상위 단위) 생성/수정/삭제 + 참여자 초대(이메일 기반)
+// ✅ FIX: Transaction read-before-write 준수
+// ✅ ADD: 이메일로 users 조회 → 프로젝트 members에 UID 추가
+// ⚠️ 규칙: 생성 관리자(owner)는 members에 추가하지 않음
 
 import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import {
+  arrayUnion,
   collection,
   deleteDoc,
   doc,
+  getDocs,
+  limit,
   onSnapshot,
   query,
   runTransaction,
@@ -28,14 +30,26 @@ type ProjectDoc = {
   name: string;
   ownerUid: string;
   ownerEmail: string;
+  members?: string[]; // ✅ 초대된 참여자 uid 목록 (owner는 포함하지 않음)
   createdAt?: any;
   updatedAt?: any;
 };
 
+type UserDoc = {
+  uid?: string; // (선택) 문서에 uid 저장하는 경우
+  email?: string; // ✅ 초대 검색용 (필수 권장)
+  role?: string;
+  isSubscribed?: boolean;
+};
+
 function pad6(n: number) {
-  // PRJ_000001 형태(6자리 padding)
   const s = String(n);
   return s.length >= 6 ? s : "0".repeat(6 - s.length) + s;
+}
+
+// 이메일 간단 정규화
+function normalizeEmail(v: string) {
+  return v.trim().toLowerCase();
 }
 
 export default function CreateProjectPage() {
@@ -52,7 +66,10 @@ export default function CreateProjectPage() {
   const [editingUid, setEditingUid] = useState<string | null>(null);
   const [editingName, setEditingName] = useState<string>("");
 
-  // 로그인 상태 추적
+  // ✅ 초대 입력(프로젝트별로 따로 입력값 유지)
+  const [inviteEmailByProject, setInviteEmailByProject] = useState<Record<string, string>>({});
+  const [inviteLoadingByProject, setInviteLoadingByProject] = useState<Record<string, boolean>>({});
+
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       if (!u) {
@@ -69,8 +86,6 @@ export default function CreateProjectPage() {
     return () => unsub();
   }, []);
 
-  // 내 프로젝트 목록 구독(실시간)
-  // - where만 쓰고, UI에서 정렬(인덱스 이슈 회피)
   useEffect(() => {
     if (!userUid) return;
 
@@ -83,7 +98,6 @@ export default function CreateProjectPage() {
       (snap) => {
         const rows = snap.docs.map((d) => d.data() as ProjectDoc);
 
-        // createdAt 최신순 정렬(서버 timestamp이므로 없을 수 있어 방어)
         rows.sort((a, b) => {
           const at = a.createdAt?.toMillis?.() ?? 0;
           const bt = b.createdAt?.toMillis?.() ?? 0;
@@ -103,7 +117,7 @@ export default function CreateProjectPage() {
     return !!userUid && !!userEmail && newName.trim().length > 0;
   }, [userUid, userEmail, newName]);
 
-  // 1) 프로젝트 생성 (PRJ_000001 자동 생성)
+  // 1) 프로젝트 생성
   const createProject = async () => {
     if (!canCreate) return;
 
@@ -113,23 +127,21 @@ export default function CreateProjectPage() {
       await runTransaction(db, async (tx) => {
         const counterRef = doc(db, "counters", "projects");
 
-        // ✅ [READ 1] counter 읽기
+        // ✅ READ 먼저
         const counterSnap = await tx.get(counterRef);
         const last = counterSnap.exists() ? Number(counterSnap.data().last ?? 0) : 0;
         const next = last + 1;
 
-        // next 값을 기반으로 uid 결정
         const uid = `PRJ_${pad6(next)}`;
         const projectRef = doc(db, "projects", uid);
 
-        // ✅ [READ 2] projectRef 존재 확인도 "write 전에" 수행해야 함
+        // ✅ READ(존재 확인)도 write 전에
         const existing = await tx.get(projectRef);
         if (existing.exists()) {
-          // 이 경우는 극히 드물지만, 트랜잭션 규칙 위반 없이 방어
           throw new Error("이미 존재하는 프로젝트 UID입니다. 다시 시도해주세요.");
         }
 
-        // ✅ 여기부터는 WRITE만 수행 (Firestore 트랜잭션 규칙 준수)
+        // ✅ WRITE
         tx.set(counterRef, { last: next }, { merge: true });
 
         tx.set(projectRef, {
@@ -137,6 +149,8 @@ export default function CreateProjectPage() {
           name,
           ownerUid: userUid,
           ownerEmail: userEmail,
+          // ✅ owner는 members에 추가하지 않음
+          members: [],
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -169,7 +183,7 @@ export default function CreateProjectPage() {
     }
   };
 
-  // 2) 프로젝트 삭제(confirm 필수)
+  // 2) 프로젝트 삭제(confirm)
   const removeProject = async (uid: string) => {
     const ok = window.confirm(
       `정말 삭제하시겠습니까?\n삭제 후 복구할 수 없습니다.\n\n대상: ${uid}`
@@ -180,6 +194,57 @@ export default function CreateProjectPage() {
       await deleteDoc(doc(db, "projects", uid));
     } catch (e: any) {
       alert(e?.message ?? "프로젝트 삭제 중 오류가 발생했습니다.");
+    }
+  };
+
+  // ✅ 3) 참여자 초대(이메일 → users에서 찾고 → members에 UID 추가)
+  const inviteMemberByEmail = async (projectUid: string) => {
+    if (!userUid) return;
+
+    const raw = inviteEmailByProject[projectUid] ?? "";
+    const email = normalizeEmail(raw);
+
+    if (!email) {
+      alert("초대할 이메일을 입력해주세요.");
+      return;
+    }
+
+    // 로딩 표시
+    setInviteLoadingByProject((prev) => ({ ...prev, [projectUid]: true }));
+
+    try {
+      // 1) users 컬렉션에서 email로 사용자 찾기
+      // ⚠️ users 문서에 email 필드가 있어야 합니다.
+      const uq = query(collection(db, "users"), where("email", "==", email), limit(1));
+      const usnap = await getDocs(uq);
+
+      if (usnap.empty) {
+        alert("해당 이메일의 사용자를 찾을 수 없습니다.");
+        return;
+      }
+
+      const userDocSnap = usnap.docs[0];
+      const invitedUid = userDocSnap.id; // ✅ users/{uid} 구조를 기준으로 UID는 doc.id
+
+      // 2) 생성 관리자(owner) 본인은 추가하지 않음
+      if (invitedUid === userUid) {
+        alert("생성 관리자(본인)는 참여자로 추가하지 않습니다.");
+        return;
+      }
+
+      // 3) 프로젝트 문서에 members arrayUnion로 UID 추가(중복 방지)
+      await updateDoc(doc(db, "projects", projectUid), {
+        members: arrayUnion(invitedUid),
+        updatedAt: serverTimestamp(),
+      });
+
+      // 입력값 초기화
+      setInviteEmailByProject((prev) => ({ ...prev, [projectUid]: "" }));
+      alert("참여자가 추가되었습니다.");
+    } catch (e: any) {
+      alert(e?.message ?? "참여자 초대 중 오류가 발생했습니다.");
+    } finally {
+      setInviteLoadingByProject((prev) => ({ ...prev, [projectUid]: false }));
     }
   };
 
@@ -196,9 +261,7 @@ export default function CreateProjectPage() {
     <main className="p-6">
       <div className="mb-6">
         <h1 className="text-xl font-bold">Project 생성/관리</h1>
-        <p className="text-sm opacity-80">
-          프로젝트는 이후 모든 하위 메뉴를 묶는 최상위 단위입니다.
-        </p>
+        <p className="text-sm opacity-80">프로젝트는 이후 모든 하위 메뉴를 묶는 최상위 단위입니다.</p>
       </div>
 
       {/* 생성 영역 */}
@@ -239,9 +302,12 @@ export default function CreateProjectPage() {
           <div className="space-y-2">
             {projects.map((p) => {
               const isEditing = editingUid === p.uid;
+              const inviteEmail = inviteEmailByProject[p.uid] ?? "";
+              const inviteLoading = inviteLoadingByProject[p.uid] ?? false;
 
               return (
-                <div key={p.uid} className="border rounded-md p-3 flex flex-col gap-2">
+                <div key={p.uid} className="border rounded-md p-3 flex flex-col gap-3">
+                  {/* 상단: 정보 + 수정/삭제 */}
                   <div className="flex items-center justify-between gap-3">
                     <div className="text-sm w-full">
                       <div className="font-semibold">{p.uid}</div>
@@ -304,6 +370,41 @@ export default function CreateProjectPage() {
                   </div>
 
                   <div className="text-xs opacity-70">Owner: {p.ownerEmail}</div>
+
+                  {/* ✅ 참여자 초대 영역 */}
+                  <div className="border rounded-md p-3">
+                    <div className="text-sm font-semibold mb-2">참여자 초대</div>
+
+                    <div className="flex gap-2 items-center">
+                      <input
+                        className="border rounded px-3 py-2 w-full"
+                        placeholder="초대할 사용자 이메일을 입력하세요"
+                        value={inviteEmail}
+                        onChange={(e) =>
+                          setInviteEmailByProject((prev) => ({
+                            ...prev,
+                            [p.uid]: e.target.value,
+                          }))
+                        }
+                      />
+                      <button
+                        className="border rounded px-4 py-2"
+                        onClick={() => inviteMemberByEmail(p.uid)}
+                        disabled={inviteLoading}
+                        title="이메일로 사용자 추가"
+                      >
+                        {inviteLoading ? "처리중" : "추가"}
+                      </button>
+                    </div>
+
+                    <div className="text-xs opacity-70 mt-2">
+                      * 해당 이메일의 사용자가 존재할 때만 추가됩니다. (생성 관리자 본인은 추가하지 않음)
+                    </div>
+
+                    <div className="text-xs opacity-70 mt-2">
+                      참여자 수: {(p.members ?? []).length}
+                    </div>
+                  </div>
                 </div>
               );
             })}
