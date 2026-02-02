@@ -1,10 +1,9 @@
 "use client";
 
 // app/contents/create_project/page.tsx
-// Project(최상위 단위) 생성/수정/삭제 + 참여자 초대(이메일 기반)
-// ✅ FIX: Transaction read-before-write 준수
-// ✅ ADD: 이메일로 users 조회 → 프로젝트 members에 UID 추가
-// ⚠️ 규칙: 생성 관리자(owner)는 members에 추가하지 않음
+// ✅ Project 생성/수정/삭제 + 참여자 초대(이메일) + 참여자 표시(email(name))
+// ✅ UI 수정사항 반영:
+// 1) 버튼 글씨 가로(세로쓰기 방지)  2) 줄바꿈 최소화(한 줄 레이아웃)  3) 참여자 표기: email(name)
 
 import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
@@ -13,6 +12,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   getDocs,
   limit,
   onSnapshot,
@@ -30,16 +30,15 @@ type ProjectDoc = {
   name: string;
   ownerUid: string;
   ownerEmail: string;
-  members?: string[]; // ✅ 초대된 참여자 uid 목록 (owner는 포함하지 않음)
+  members?: string[]; // 초대된 참여자 uid 목록 (owner는 포함하지 않음)
   createdAt?: any;
   updatedAt?: any;
 };
 
-type UserDoc = {
-  uid?: string; // (선택) 문서에 uid 저장하는 경우
-  email?: string; // ✅ 초대 검색용 (필수 권장)
-  role?: string;
-  isSubscribed?: boolean;
+type MemberProfile = {
+  uid: string;
+  email: string;
+  name: string;
 };
 
 function pad6(n: number) {
@@ -47,9 +46,17 @@ function pad6(n: number) {
   return s.length >= 6 ? s : "0".repeat(6 - s.length) + s;
 }
 
-// 이메일 간단 정규화
 function normalizeEmail(v: string) {
-  return v.trim().toLowerCase();
+  return (v ?? "").trim().toLowerCase();
+}
+
+function fallbackNameFromEmail(email: string) {
+  const at = email.indexOf("@");
+  return at > 0 ? email.slice(0, at) : email;
+}
+
+function safeTrim(v: any) {
+  return typeof v === "string" ? v.trim() : "";
 }
 
 export default function CreateProjectPage() {
@@ -66,10 +73,14 @@ export default function CreateProjectPage() {
   const [editingUid, setEditingUid] = useState<string | null>(null);
   const [editingName, setEditingName] = useState<string>("");
 
-  // ✅ 초대 입력(프로젝트별로 따로 입력값 유지)
+  // 초대 입력(프로젝트별)
   const [inviteEmailByProject, setInviteEmailByProject] = useState<Record<string, string>>({});
   const [inviteLoadingByProject, setInviteLoadingByProject] = useState<Record<string, boolean>>({});
 
+  // 참여자 프로필 캐시(uid -> profile)
+  const [memberProfileByUid, setMemberProfileByUid] = useState<Record<string, MemberProfile>>({});
+
+  // 로그인 상태
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       if (!u) {
@@ -80,12 +91,13 @@ export default function CreateProjectPage() {
         return;
       }
       setUserUid(u.uid);
-      setUserEmail(u.email ?? "");
+      setUserEmail(normalizeEmail(u.email ?? ""));
     });
 
     return () => unsub();
   }, []);
 
+  // 프로젝트 목록(생성자 기준)
   useEffect(() => {
     if (!userUid) return;
 
@@ -98,6 +110,7 @@ export default function CreateProjectPage() {
       (snap) => {
         const rows = snap.docs.map((d) => d.data() as ProjectDoc);
 
+        // createdAt 최신순(없으면 0)
         rows.sort((a, b) => {
           const at = a.createdAt?.toMillis?.() ?? 0;
           const bt = b.createdAt?.toMillis?.() ?? 0;
@@ -113,11 +126,54 @@ export default function CreateProjectPage() {
     return () => unsub();
   }, [userUid]);
 
+  // projects 바뀔 때: members uid들의 users 프로필을 가져와 캐시 채움
+  useEffect(() => {
+    const uids = new Set<string>();
+    projects.forEach((p) => (p.members ?? []).forEach((uid) => uid && uids.add(uid)));
+
+    const needFetch = Array.from(uids).filter((uid) => !memberProfileByUid[uid]);
+    if (needFetch.length === 0) return;
+
+    let cancelled = false;
+
+    (async () => {
+      const updates: Record<string, MemberProfile> = {};
+
+      await Promise.all(
+        needFetch.map(async (uid) => {
+          try {
+            const snap = await getDoc(doc(db, "users", uid));
+            if (!snap.exists()) return;
+
+            const data = snap.data() as any;
+            const email = normalizeEmail(data?.email ?? "");
+            const name = safeTrim(data?.name) || fallbackNameFromEmail(email);
+
+            updates[uid] = { uid, email, name };
+          } catch {
+            // 무시(권한/네트워크 등)
+          }
+        })
+      );
+
+      if (cancelled) return;
+
+      if (Object.keys(updates).length > 0) {
+        setMemberProfileByUid((prev) => ({ ...prev, ...updates }));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects]);
+
   const canCreate = useMemo(() => {
     return !!userUid && !!userEmail && newName.trim().length > 0;
   }, [userUid, userEmail, newName]);
 
-  // 1) 프로젝트 생성
+  // 프로젝트 생성 (PRJ_000001 자동)
   const createProject = async () => {
     if (!canCreate) return;
 
@@ -143,14 +199,12 @@ export default function CreateProjectPage() {
 
         // ✅ WRITE
         tx.set(counterRef, { last: next }, { merge: true });
-
         tx.set(projectRef, {
           uid,
           name,
           ownerUid: userUid,
           ownerEmail: userEmail,
-          // ✅ owner는 members에 추가하지 않음
-          members: [],
+          members: [], // ✅ owner는 members에 추가하지 않음
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -162,7 +216,7 @@ export default function CreateProjectPage() {
     }
   };
 
-  // 2) 프로젝트명 수정
+  // 프로젝트명 저장
   const saveName = async (uid: string) => {
     const name = editingName.trim();
     if (!name) {
@@ -183,11 +237,9 @@ export default function CreateProjectPage() {
     }
   };
 
-  // 2) 프로젝트 삭제(confirm)
+  // 프로젝트 삭제(confirm)
   const removeProject = async (uid: string) => {
-    const ok = window.confirm(
-      `정말 삭제하시겠습니까?\n삭제 후 복구할 수 없습니다.\n\n대상: ${uid}`
-    );
+    const ok = window.confirm(`정말 삭제하시겠습니까?\n삭제 후 복구할 수 없습니다.\n\n대상: ${uid}`);
     if (!ok) return;
 
     try {
@@ -197,7 +249,7 @@ export default function CreateProjectPage() {
     }
   };
 
-  // ✅ 3) 참여자 초대(이메일 → users에서 찾고 → members에 UID 추가)
+  // 참여자 초대: 이메일 -> users 조회 -> members에 UID 추가 (owner는 추가 안 함)
   const inviteMemberByEmail = async (projectUid: string) => {
     if (!userUid) return;
 
@@ -209,12 +261,9 @@ export default function CreateProjectPage() {
       return;
     }
 
-    // 로딩 표시
     setInviteLoadingByProject((prev) => ({ ...prev, [projectUid]: true }));
 
     try {
-      // 1) users 컬렉션에서 email로 사용자 찾기
-      // ⚠️ users 문서에 email 필드가 있어야 합니다.
       const uq = query(collection(db, "users"), where("email", "==", email), limit(1));
       const usnap = await getDocs(uq);
 
@@ -224,23 +273,30 @@ export default function CreateProjectPage() {
       }
 
       const userDocSnap = usnap.docs[0];
-      const invitedUid = userDocSnap.id; // ✅ users/{uid} 구조를 기준으로 UID는 doc.id
+      const invitedUid = userDocSnap.id;
 
-      // 2) 생성 관리자(owner) 본인은 추가하지 않음
+      // ✅ 생성 관리자(owner)는 members에 추가하지 않음
       if (invitedUid === userUid) {
         alert("생성 관리자(본인)는 참여자로 추가하지 않습니다.");
         return;
       }
 
-      // 3) 프로젝트 문서에 members arrayUnion로 UID 추가(중복 방지)
       await updateDoc(doc(db, "projects", projectUid), {
         members: arrayUnion(invitedUid),
         updatedAt: serverTimestamp(),
       });
 
-      // 입력값 초기화
+      // 캐시에 즉시 반영(표시 지연 방지)
+      const data = userDocSnap.data() as any;
+      const invitedEmail = normalizeEmail(data?.email ?? email);
+      const invitedName = safeTrim(data?.name) || fallbackNameFromEmail(invitedEmail);
+
+      setMemberProfileByUid((prev) => ({
+        ...prev,
+        [invitedUid]: { uid: invitedUid, email: invitedEmail, name: invitedName },
+      }));
+
       setInviteEmailByProject((prev) => ({ ...prev, [projectUid]: "" }));
-      alert("참여자가 추가되었습니다.");
     } catch (e: any) {
       alert(e?.message ?? "참여자 초대 중 오류가 발생했습니다.");
     } finally {
@@ -261,22 +317,20 @@ export default function CreateProjectPage() {
     <main className="p-6">
       <div className="mb-6">
         <h1 className="text-xl font-bold">Project 생성/관리</h1>
-        <p className="text-sm opacity-80">프로젝트는 이후 모든 하위 메뉴를 묶는 최상위 단위입니다.</p>
       </div>
 
       {/* 생성 영역 */}
       <section className="border rounded-md p-4 mb-6">
-        <h2 className="font-semibold mb-3">새 Project 생성</h2>
-
-        <div className="flex gap-2 items-center">
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="font-semibold whitespace-nowrap">새 Project</div>
           <input
-            className="border rounded px-3 py-2 w-full"
-            placeholder="Project 명을 입력하세요"
+            className="border rounded px-3 py-2 flex-1 min-w-[220px]"
+            placeholder="Project 명"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
           />
           <button
-            className="border rounded px-4 py-2"
+            className="border rounded px-4 py-2 whitespace-nowrap"
             onClick={createProject}
             disabled={!canCreate}
             title={!canCreate ? "프로젝트명을 입력해주세요." : "생성"}
@@ -284,15 +338,11 @@ export default function CreateProjectPage() {
             생성
           </button>
         </div>
-
-        <p className="text-xs opacity-70 mt-2">
-          생성 시 UID는 <code>PRJ_000001</code> 형태로 자동 부여됩니다.
-        </p>
       </section>
 
       {/* 목록 */}
       <section className="border rounded-md p-4">
-        <h2 className="font-semibold mb-3">내 Project 목록</h2>
+        <div className="font-semibold mb-3">내 Project 목록</div>
 
         {loading ? (
           <p className="text-sm opacity-80">불러오는 중...</p>
@@ -305,30 +355,63 @@ export default function CreateProjectPage() {
               const inviteEmail = inviteEmailByProject[p.uid] ?? "";
               const inviteLoading = inviteLoadingByProject[p.uid] ?? false;
 
+              const memberUids = p.members ?? [];
+              const memberText = memberUids
+                .map((uid) => {
+                  const mp = memberProfileByUid[uid];
+                  if (!mp) return uid;
+                  // ✅ 요구사항: 이메일(사용자이름)
+                  return `${mp.email}(${mp.name})`;
+                })
+                .join(", ");
+
               return (
-                <div key={p.uid} className="border rounded-md p-3 flex flex-col gap-3">
-                  {/* 상단: 정보 + 수정/삭제 */}
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm w-full">
-                      <div className="font-semibold">{p.uid}</div>
+                <div key={p.uid} className="border rounded-md p-3">
+                  {/* ✅ 줄바꿈 최소화: 좌측 "ID : NAME" + 우측 초대 + 우측끝 편집 버튼 */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {/* 좌측: PRJ_000001 : KIND */}
+                    <div className="flex items-center gap-2 flex-1 min-w-[260px]">
+                      <div className="text-sm font-semibold whitespace-nowrap">{p.uid}</div>
+                      <div className="text-sm opacity-70 whitespace-nowrap">:</div>
 
                       {!isEditing ? (
-                        <div className="opacity-90">{p.name}</div>
+                        <div className="text-sm font-semibold truncate">{p.name}</div>
                       ) : (
                         <input
-                          className="border rounded px-3 py-2 w-full mt-2"
+                          className="border rounded px-3 py-2 text-sm w-full min-w-[200px]"
                           value={editingName}
                           onChange={(e) => setEditingName(e.target.value)}
-                          placeholder="새 Project 명"
+                          placeholder="Project 명"
                         />
                       )}
                     </div>
 
-                    <div className="flex gap-2 shrink-0">
+                    {/* 우측: 참여자 추가(같은 줄) */}
+                    <div className="flex items-center gap-2">
+                      <input
+                        className="border rounded px-3 py-2 text-sm w-[260px] max-w-[60vw]"
+                        placeholder="참여자 이메일"
+                        value={inviteEmail}
+                        onChange={(e) =>
+                          setInviteEmailByProject((prev) => ({ ...prev, [p.uid]: e.target.value }))
+                        }
+                      />
+                      <button
+                        className="border rounded px-3 py-2 text-sm whitespace-nowrap"
+                        onClick={() => inviteMemberByEmail(p.uid)}
+                        disabled={inviteLoading}
+                        title="참여자 추가"
+                      >
+                        {inviteLoading ? "처리중" : "추가"}
+                      </button>
+                    </div>
+
+                    {/* 우측 끝: 수정/삭제(가로 버튼) */}
+                    <div className="flex items-center gap-2">
                       {!isEditing ? (
                         <>
                           <button
-                            className="border rounded px-3 py-2"
+                            className="border rounded px-3 py-2 text-sm whitespace-nowrap"
                             onClick={() => {
                               setEditingUid(p.uid);
                               setEditingName(p.name);
@@ -338,7 +421,7 @@ export default function CreateProjectPage() {
                             수정
                           </button>
                           <button
-                            className="border rounded px-3 py-2"
+                            className="border rounded px-3 py-2 text-sm whitespace-nowrap"
                             onClick={() => removeProject(p.uid)}
                             title="프로젝트 삭제"
                           >
@@ -348,14 +431,14 @@ export default function CreateProjectPage() {
                       ) : (
                         <>
                           <button
-                            className="border rounded px-3 py-2"
+                            className="border rounded px-3 py-2 text-sm whitespace-nowrap"
                             onClick={() => saveName(p.uid)}
                             title="저장"
                           >
                             저장
                           </button>
                           <button
-                            className="border rounded px-3 py-2"
+                            className="border rounded px-3 py-2 text-sm whitespace-nowrap"
                             onClick={() => {
                               setEditingUid(null);
                               setEditingName("");
@@ -369,41 +452,10 @@ export default function CreateProjectPage() {
                     </div>
                   </div>
 
-                  <div className="text-xs opacity-70">Owner: {p.ownerEmail}</div>
-
-                  {/* ✅ 참여자 초대 영역 */}
-                  <div className="border rounded-md p-3">
-                    <div className="text-sm font-semibold mb-2">참여자 초대</div>
-
-                    <div className="flex gap-2 items-center">
-                      <input
-                        className="border rounded px-3 py-2 w-full"
-                        placeholder="초대할 사용자 이메일을 입력하세요"
-                        value={inviteEmail}
-                        onChange={(e) =>
-                          setInviteEmailByProject((prev) => ({
-                            ...prev,
-                            [p.uid]: e.target.value,
-                          }))
-                        }
-                      />
-                      <button
-                        className="border rounded px-4 py-2"
-                        onClick={() => inviteMemberByEmail(p.uid)}
-                        disabled={inviteLoading}
-                        title="이메일로 사용자 추가"
-                      >
-                        {inviteLoading ? "처리중" : "추가"}
-                      </button>
-                    </div>
-
-                    <div className="text-xs opacity-70 mt-2">
-                      * 해당 이메일의 사용자가 존재할 때만 추가됩니다. (생성 관리자 본인은 추가하지 않음)
-                    </div>
-
-                    <div className="text-xs opacity-70 mt-2">
-                      참여자 수: {(p.members ?? []).length}
-                    </div>
+                  {/* 참여자 표시: email(name) */}
+                  <div className="mt-2 text-xs opacity-80">
+                    <span className="font-semibold">참여자:</span>{" "}
+                    {memberUids.length === 0 ? "없음" : memberText}
                   </div>
                 </div>
               );
