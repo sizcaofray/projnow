@@ -1,13 +1,18 @@
 "use client";
 
 // app/contents/create_project/page.tsx
-// ✅ Project 생성/수정/삭제 + 참여자 초대(이메일) + 참여자 표시(email(name))
-// ✅ UI 수정사항 반영:
-// 1) 버튼 글씨 가로(세로쓰기 방지)  2) 줄바꿈 최소화(한 줄 레이아웃)  3) 참여자 표기: email(name)
+// ✅ Project 생성/수정/삭제 + 참여자 초대(이메일) + 참여자 삭제 관리
+// ✅ UI 요구 반영:
+// 1) 버튼 글씨 가로(whitespace-nowrap)
+// 2) 줄바꿈 최소화: "PRJ_000001 : KIND" 한 줄 + 우측에 참여자 추가/버튼
+// 3) 참여자 표기: email(name)
+// ✅ 생성자(owner)는 참여자 표시에 포함되나, members에는 저장하지 않음(표시만 포함)
+// ✅ 참여자 삭제는 members에서만 제거(arrayRemove), owner 삭제 불가(confirm)
 
 import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import {
+  arrayRemove,
   arrayUnion,
   collection,
   deleteDoc,
@@ -30,7 +35,7 @@ type ProjectDoc = {
   name: string;
   ownerUid: string;
   ownerEmail: string;
-  members?: string[]; // 초대된 참여자 uid 목록 (owner는 포함하지 않음)
+  members?: string[]; // 참여자 uid 목록 (owner는 포함하지 않음)
   createdAt?: any;
   updatedAt?: any;
 };
@@ -50,13 +55,18 @@ function normalizeEmail(v: string) {
   return (v ?? "").trim().toLowerCase();
 }
 
+function safeTrim(v: any) {
+  return typeof v === "string" ? v.trim() : "";
+}
+
 function fallbackNameFromEmail(email: string) {
   const at = email.indexOf("@");
   return at > 0 ? email.slice(0, at) : email;
 }
 
-function safeTrim(v: any) {
-  return typeof v === "string" ? v.trim() : "";
+function formatMember(email: string, name: string) {
+  // ✅ 요구사항: 이메일(사용자이름)
+  return `${email}(${name})`;
 }
 
 export default function CreateProjectPage() {
@@ -76,6 +86,9 @@ export default function CreateProjectPage() {
   // 초대 입력(프로젝트별)
   const [inviteEmailByProject, setInviteEmailByProject] = useState<Record<string, string>>({});
   const [inviteLoadingByProject, setInviteLoadingByProject] = useState<Record<string, boolean>>({});
+
+  // 삭제 로딩(프로젝트별 + uid별)
+  const [removeLoadingKey, setRemoveLoadingKey] = useState<string>("");
 
   // 참여자 프로필 캐시(uid -> profile)
   const [memberProfileByUid, setMemberProfileByUid] = useState<Record<string, MemberProfile>>({});
@@ -97,12 +110,11 @@ export default function CreateProjectPage() {
     return () => unsub();
   }, []);
 
-  // 프로젝트 목록(생성자 기준)
+  // 프로젝트 목록(생성자 기준: 관리자만 사용하는 페이지이므로 ownerUid==나 기준 유지)
   useEffect(() => {
     if (!userUid) return;
 
     setLoading(true);
-
     const q = query(collection(db, "projects"), where("ownerUid", "==", userUid));
 
     const unsub = onSnapshot(
@@ -110,7 +122,6 @@ export default function CreateProjectPage() {
       (snap) => {
         const rows = snap.docs.map((d) => d.data() as ProjectDoc);
 
-        // createdAt 최신순(없으면 0)
         rows.sort((a, b) => {
           const at = a.createdAt?.toMillis?.() ?? 0;
           const bt = b.createdAt?.toMillis?.() ?? 0;
@@ -126,10 +137,14 @@ export default function CreateProjectPage() {
     return () => unsub();
   }, [userUid]);
 
-  // projects 바뀔 때: members uid들의 users 프로필을 가져와 캐시 채움
+  // projects 바뀔 때: members + ownerUid 프로필을 캐시에 채움
   useEffect(() => {
     const uids = new Set<string>();
-    projects.forEach((p) => (p.members ?? []).forEach((uid) => uid && uids.add(uid)));
+
+    projects.forEach((p) => {
+      if (p.ownerUid) uids.add(p.ownerUid);
+      (p.members ?? []).forEach((uid) => uid && uids.add(uid));
+    });
 
     const needFetch = Array.from(uids).filter((uid) => !memberProfileByUid[uid]);
     if (needFetch.length === 0) return;
@@ -151,13 +166,12 @@ export default function CreateProjectPage() {
 
             updates[uid] = { uid, email, name };
           } catch {
-            // 무시(권한/네트워크 등)
+            // 무시
           }
         })
       );
 
       if (cancelled) return;
-
       if (Object.keys(updates).length > 0) {
         setMemberProfileByUid((prev) => ({ ...prev, ...updates }));
       }
@@ -173,10 +187,9 @@ export default function CreateProjectPage() {
     return !!userUid && !!userEmail && newName.trim().length > 0;
   }, [userUid, userEmail, newName]);
 
-  // 프로젝트 생성 (PRJ_000001 자동)
+  // 프로젝트 생성
   const createProject = async () => {
     if (!canCreate) return;
-
     const name = newName.trim();
 
     try {
@@ -193,9 +206,7 @@ export default function CreateProjectPage() {
 
         // ✅ READ(존재 확인)도 write 전에
         const existing = await tx.get(projectRef);
-        if (existing.exists()) {
-          throw new Error("이미 존재하는 프로젝트 UID입니다. 다시 시도해주세요.");
-        }
+        if (existing.exists()) throw new Error("이미 존재하는 프로젝트 UID입니다. 다시 시도해주세요.");
 
         // ✅ WRITE
         tx.set(counterRef, { last: next }, { merge: true });
@@ -204,7 +215,7 @@ export default function CreateProjectPage() {
           name,
           ownerUid: userUid,
           ownerEmail: userEmail,
-          members: [], // ✅ owner는 members에 추가하지 않음
+          members: [], // owner는 members에 저장하지 않음
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -275,7 +286,7 @@ export default function CreateProjectPage() {
       const userDocSnap = usnap.docs[0];
       const invitedUid = userDocSnap.id;
 
-      // ✅ 생성 관리자(owner)는 members에 추가하지 않음
+      // ✅ owner(본인) 저장은 금지(요구 유지)
       if (invitedUid === userUid) {
         alert("생성 관리자(본인)는 참여자로 추가하지 않습니다.");
         return;
@@ -298,9 +309,29 @@ export default function CreateProjectPage() {
 
       setInviteEmailByProject((prev) => ({ ...prev, [projectUid]: "" }));
     } catch (e: any) {
-      alert(e?.message ?? "참여자 초대 중 오류가 발생했습니다.");
+      alert(e?.message ?? "참여자 추가 중 오류가 발생했습니다.");
     } finally {
       setInviteLoadingByProject((prev) => ({ ...prev, [projectUid]: false }));
+    }
+  };
+
+  // ✅ 참여자 삭제: members에서만 제거(arrayRemove), owner는 삭제 불가
+  const removeMember = async (projectUid: string, memberUid: string, label: string) => {
+    const ok = window.confirm(`참여자를 삭제하시겠습니까?\n\n대상: ${label}`);
+    if (!ok) return;
+
+    const key = `${projectUid}:${memberUid}`;
+    setRemoveLoadingKey(key);
+
+    try {
+      await updateDoc(doc(db, "projects", projectUid), {
+        members: arrayRemove(memberUid),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (e: any) {
+      alert(e?.message ?? "참여자 삭제 중 오류가 발생했습니다.");
+    } finally {
+      setRemoveLoadingKey("");
     }
   };
 
@@ -319,7 +350,7 @@ export default function CreateProjectPage() {
         <h1 className="text-xl font-bold">Project 생성/관리</h1>
       </div>
 
-      {/* 생성 영역 */}
+      {/* 생성 */}
       <section className="border rounded-md p-4 mb-6">
         <div className="flex items-center gap-2 flex-wrap">
           <div className="font-semibold whitespace-nowrap">새 Project</div>
@@ -355,21 +386,25 @@ export default function CreateProjectPage() {
               const inviteEmail = inviteEmailByProject[p.uid] ?? "";
               const inviteLoading = inviteLoadingByProject[p.uid] ?? false;
 
+              // ✅ owner 표시용 프로필(없으면 ownerEmail 기반 fallback)
+              const ownerProfile = memberProfileByUid[p.ownerUid];
+              const ownerEmail = normalizeEmail(ownerProfile?.email ?? p.ownerEmail);
+              const ownerName = safeTrim(ownerProfile?.name) || fallbackNameFromEmail(ownerEmail);
+              const ownerLabel = formatMember(ownerEmail, ownerName);
+
+              // ✅ members 표시용 목록
               const memberUids = p.members ?? [];
-              const memberText = memberUids
-                .map((uid) => {
-                  const mp = memberProfileByUid[uid];
-                  if (!mp) return uid;
-                  // ✅ 요구사항: 이메일(사용자이름)
-                  return `${mp.email}(${mp.name})`;
-                })
-                .join(", ");
+
+              const memberLabels = memberUids.map((uid) => {
+                const mp = memberProfileByUid[uid];
+                if (!mp) return { uid, label: uid };
+                return { uid, label: formatMember(mp.email, mp.name) };
+              });
 
               return (
                 <div key={p.uid} className="border rounded-md p-3">
-                  {/* ✅ 줄바꿈 최소화: 좌측 "ID : NAME" + 우측 초대 + 우측끝 편집 버튼 */}
+                  {/* 한 줄: ID:Name + 참여자추가 + 버튼들 */}
                   <div className="flex items-center gap-2 flex-wrap">
-                    {/* 좌측: PRJ_000001 : KIND */}
                     <div className="flex items-center gap-2 flex-1 min-w-[260px]">
                       <div className="text-sm font-semibold whitespace-nowrap">{p.uid}</div>
                       <div className="text-sm opacity-70 whitespace-nowrap">:</div>
@@ -386,7 +421,7 @@ export default function CreateProjectPage() {
                       )}
                     </div>
 
-                    {/* 우측: 참여자 추가(같은 줄) */}
+                    {/* 참여자 추가(오른쪽) */}
                     <div className="flex items-center gap-2">
                       <input
                         className="border rounded px-3 py-2 text-sm w-[260px] max-w-[60vw]"
@@ -406,7 +441,7 @@ export default function CreateProjectPage() {
                       </button>
                     </div>
 
-                    {/* 우측 끝: 수정/삭제(가로 버튼) */}
+                    {/* 수정/삭제 */}
                     <div className="flex items-center gap-2">
                       {!isEditing ? (
                         <>
@@ -416,14 +451,12 @@ export default function CreateProjectPage() {
                               setEditingUid(p.uid);
                               setEditingName(p.name);
                             }}
-                            title="프로젝트명 수정"
                           >
                             수정
                           </button>
                           <button
                             className="border rounded px-3 py-2 text-sm whitespace-nowrap"
                             onClick={() => removeProject(p.uid)}
-                            title="프로젝트 삭제"
                           >
                             삭제
                           </button>
@@ -433,7 +466,6 @@ export default function CreateProjectPage() {
                           <button
                             className="border rounded px-3 py-2 text-sm whitespace-nowrap"
                             onClick={() => saveName(p.uid)}
-                            title="저장"
                           >
                             저장
                           </button>
@@ -443,7 +475,6 @@ export default function CreateProjectPage() {
                               setEditingUid(null);
                               setEditingName("");
                             }}
-                            title="취소"
                           >
                             취소
                           </button>
@@ -452,10 +483,39 @@ export default function CreateProjectPage() {
                     </div>
                   </div>
 
-                  {/* 참여자 표시: email(name) */}
-                  <div className="mt-2 text-xs opacity-80">
-                    <span className="font-semibold">참여자:</span>{" "}
-                    {memberUids.length === 0 ? "없음" : memberText}
+                  {/* 참여자 관리 표시(줄바꿈 최소화: 한 줄 + 삭제 버튼은 아이템별) */}
+                  <div className="mt-2 text-xs opacity-80 flex flex-wrap items-center gap-2">
+                    <span className="font-semibold whitespace-nowrap">참여자:</span>
+
+                    {/* owner는 항상 표시(삭제 버튼 없음) */}
+                    <span className="inline-flex items-center gap-2 border rounded px-2 py-1">
+                      <span className="whitespace-nowrap">{ownerLabel}</span>
+                      <span className="text-[10px] opacity-70 whitespace-nowrap">Owner</span>
+                    </span>
+
+                    {/* members: 삭제 가능 */}
+                    {memberLabels.length === 0 ? (
+                      <span className="opacity-70 whitespace-nowrap">없음</span>
+                    ) : (
+                      memberLabels.map(({ uid, label }) => {
+                        const key = `${p.uid}:${uid}`;
+                        const removing = removeLoadingKey === key;
+
+                        return (
+                          <span key={uid} className="inline-flex items-center gap-2 border rounded px-2 py-1">
+                            <span className="whitespace-nowrap">{label}</span>
+                            <button
+                              className="border rounded px-2 py-0.5 text-[11px] whitespace-nowrap"
+                              onClick={() => removeMember(p.uid, uid, label)}
+                              disabled={removing}
+                              title="참여자 삭제"
+                            >
+                              {removing ? "..." : "삭제"}
+                            </button>
+                          </span>
+                        );
+                      })
+                    )}
                   </div>
                 </div>
               );
