@@ -3,19 +3,13 @@
 /**
  * projnow/app/contents/project_document/page.tsx
  *
- * ✅ 목표
- * - Project → Category(무한 하위) 트리 저장(Firestore)
- * - Category 하단: 파일 등록폼 여러 개 생성(로컬 UI 상태)
- * - 파일 업로드 1개씩(Drag&Drop/선택) → Storage 저장 + Firestore 메타 저장
- * - 동일 파일명 경고 + 버전 입력 분리
- * - 각 파일마다 Modification List 생성/삭제(Storage + Firestore)
- * - 생성/삭제/업로드 등 이력은 별도 audit 컬렉션에 기록(Firestore)
+ * ✅ 변경사항(요청 반영)
+ * - 프로젝트 저장 시 기본 카테고리 1개를 자동 생성합니다.
+ * - 기본 카테고리 하단에 파일 등록폼 1개를 자동 생성합니다.
+ * - 카테고리 추가 시에도 해당 카테고리의 기본 파일 등록폼 1개를 자동 생성합니다.
  *
- * ✅ 빌드 에러 대응
- * - "@/lib/firebaseClient" 같은 프로젝트 내부 경로 의존 없이
- *   이 파일 내부에서 Firebase Client SDK 초기화를 수행합니다.
- *
- * ⚠️ 필수 환경변수 (Vercel/로컬 .env)
+ * ⚠️ Firebase 초기화는 이 파일 내부에서 수행(프로젝트 내부 경로 의존 제거)
+ * ⚠️ 필수 환경변수:
  * - NEXT_PUBLIC_FIREBASE_API_KEY
  * - NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
  * - NEXT_PUBLIC_FIREBASE_PROJECT_ID
@@ -57,7 +51,6 @@ import {
  * Firebase init (이 파일에서 안전하게 1회 초기화)
  * ------------------------------ */
 function getFirebaseClient(): { app: FirebaseApp; auth: Auth; db: Firestore; storage: FirebaseStorage } {
-  // 환경변수 누락 시 런타임에서 알기 쉬운 메시지
   const cfg = {
     apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY!,
     authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN!,
@@ -67,7 +60,6 @@ function getFirebaseClient(): { app: FirebaseApp; auth: Auth; db: Firestore; sto
     appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID!,
   };
 
-  // 최소 값 확인(빈 문자열/undefined 방지)
   const missing = Object.entries(cfg).filter(([, v]) => !v).map(([k]) => k);
   if (missing.length > 0) {
     // eslint-disable-next-line no-console
@@ -111,9 +103,9 @@ type FileItem = {
   id: string;
   projectId: string;
   nodeId: string;
-  displayName: string; // 사용자 입력 파일명
-  version: string; // 사용자 입력 버전
-  originalName: string; // 업로드 실제 파일명
+  displayName: string;
+  version: string;
+  originalName: string;
   storagePath: string;
   downloadUrl?: string;
   createdAt?: any;
@@ -187,7 +179,6 @@ export default function ProjectDocumentPage() {
    * Effects
    * ------------------------------ */
   useEffect(() => {
-    // 로그인 상태 구독
     const unsub = onAuthStateChanged(auth, (user) => {
       if (!user) {
         setUid(null);
@@ -255,8 +246,27 @@ export default function ProjectDocumentPage() {
     return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   }
 
+  function createDefaultUploadForm(): UploadForm {
+    // ✅ 기본 파일 등록폼(1개)
+    return {
+      formId: makeLocalId("form"),
+      displayName: "",
+      version: "",
+      fileObj: null,
+      duplicateNameWarn: false,
+    };
+  }
+
+  function ensureOneUploadForm(nodeId: string) {
+    // ✅ 특정 카테고리(nodeId)에 업로드폼이 0개면 1개 자동 생성
+    setUploadFormsByNode((prev) => {
+      const curr = prev[nodeId] ?? [];
+      if (curr.length > 0) return prev;
+      return { ...prev, [nodeId]: [createDefaultUploadForm()] };
+    });
+  }
+
   async function writeAudit(projectId: string, action: AuditAction, payload: Record<string, any>) {
-    // (9) 별도 테이블에 이력관리
     if (!uid) return;
     await addDoc(collection(db, "project_document_audit"), {
       projectId,
@@ -285,7 +295,8 @@ export default function ProjectDocumentPage() {
         orderBy("order", "asc")
       );
       const nSnap = await getDocs(nodesQ);
-      setNodes(nSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as TreeNode[]);
+      const nList = nSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as TreeNode[];
+      setNodes(nList);
 
       // files
       const filesQ = query(collection(db, "project_document_files"), where("projectId", "==", projectId));
@@ -296,6 +307,12 @@ export default function ProjectDocumentPage() {
       const modsQ = query(collection(db, "project_document_mods"), where("projectId", "==", projectId));
       const mSnap = await getDocs(modsQ);
       setMods(mSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as ModDoc[]);
+
+      // ✅ 중요: 카테고리가 이미 존재하는 프로젝트라면, "첫 카테고리"에 기본 폼이 없을 때 자동 생성
+      const firstCategory = nList.find((n) => n.type === "category");
+      if (firstCategory) {
+        ensureOneUploadForm(firstCategory.id);
+      }
     } finally {
       setLoading(false);
     }
@@ -303,6 +320,7 @@ export default function ProjectDocumentPage() {
 
   /** -----------------------------
    * (1) Project create/save
+   * - ✅ 프로젝트 저장 시 기본 카테고리 + 기본 파일 등록폼 자동 생성
    * ------------------------------ */
   async function handleCreateProject() {
     if (!uid) {
@@ -317,7 +335,7 @@ export default function ProjectDocumentPage() {
 
     setLoading(true);
     try {
-      // 프로젝트 생성
+      // 1) 프로젝트 문서 생성
       const projectRef = await addDoc(collection(db, "project_documents"), {
         name,
         createdBy: uid,
@@ -326,8 +344,8 @@ export default function ProjectDocumentPage() {
         updatedAt: serverTimestamp(),
       });
 
-      // 프로젝트 루트 노드 생성(type="project")
-      await addDoc(collection(db, "project_document_nodes"), {
+      // 2) 프로젝트 루트 노드 생성(type="project")
+      const rootRef = await addDoc(collection(db, "project_document_nodes"), {
         projectId: projectRef.id,
         type: "project",
         parentId: null,
@@ -338,7 +356,32 @@ export default function ProjectDocumentPage() {
         createdAt: serverTimestamp(),
       });
 
+      // ✅ 3) 기본 카테고리 자동 생성 (요청 반영)
+      const defaultCategoryName = "Default Category";
+      const categoryRef = await addDoc(collection(db, "project_document_nodes"), {
+        projectId: projectRef.id,
+        type: "category",
+        parentId: rootRef.id, // 루트 아래
+        name: defaultCategoryName,
+        order: 1,
+        createdBy: uid,
+        createdByEmail: userEmail ?? null,
+        createdAt: serverTimestamp(),
+      });
+
+      // ✅ 4) 기본 파일 등록폼 1개 자동 생성(로컬 UI 상태)
+      setUploadFormsByNode(() => ({
+        [categoryRef.id]: [createDefaultUploadForm()],
+      }));
+
+      // 로그
       await writeAudit(projectRef.id, "PROJECT_CREATE", { name });
+      await writeAudit(projectRef.id, "CATEGORY_CREATE", {
+        nodeId: categoryRef.id,
+        parentId: rootRef.id,
+        name: defaultCategoryName,
+        auto: true,
+      });
 
       // 활성 프로젝트 설정
       setActiveProjectId(projectRef.id);
@@ -350,6 +393,7 @@ export default function ProjectDocumentPage() {
 
   /** -----------------------------
    * (2)(3) Category create/delete
+   * - ✅ 카테고리 생성 시 기본 파일 등록폼 1개 자동 생성(요청 흐름에 맞춤)
    * ------------------------------ */
   async function handleAddCategory(parentId: string) {
     if (!uid || !activeProjectId) {
@@ -380,6 +424,9 @@ export default function ProjectDocumentPage() {
 
       await writeAudit(activeProjectId, "CATEGORY_CREATE", { nodeId: nodeRef.id, parentId, name });
 
+      // ✅ 생성된 카테고리에 기본 파일 등록폼 1개 자동 생성
+      ensureOneUploadForm(nodeRef.id);
+
       setNewCategoryNameByParent((prev) => ({ ...prev, [parentId]: "" }));
       await loadProjectAll(activeProjectId);
     } finally {
@@ -388,7 +435,6 @@ export default function ProjectDocumentPage() {
   }
 
   async function handleDeleteCategory(nodeId: string) {
-    // 안전장치: 하위/파일 존재 시 삭제 불가
     if (!uid || !activeProjectId) {
       alert("로그인이 필요합니다.");
       return;
@@ -407,6 +453,14 @@ export default function ProjectDocumentPage() {
     try {
       await deleteDoc(doc(db, "project_document_nodes", nodeId));
       await writeAudit(activeProjectId, "CATEGORY_DELETE", { nodeId });
+
+      // ✅ UI 폼 상태도 정리(로컬)
+      setUploadFormsByNode((prev) => {
+        const next = { ...prev };
+        delete next[nodeId];
+        return next;
+      });
+
       await loadProjectAll(activeProjectId);
     } finally {
       setLoading(false);
@@ -414,16 +468,10 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
-   * (4)(5) Upload form add/remove/update
+   * Upload form UI handlers
    * ------------------------------ */
   function addUploadForm(nodeId: string) {
-    const newForm: UploadForm = {
-      formId: makeLocalId("form"),
-      displayName: "",
-      version: "",
-      fileObj: null,
-      duplicateNameWarn: false,
-    };
+    const newForm = createDefaultUploadForm();
     setUploadFormsByNode((prev) => {
       const next = { ...prev };
       const arr = next[nodeId] ? [...next[nodeId]] : [];
@@ -437,6 +485,11 @@ export default function ProjectDocumentPage() {
     setUploadFormsByNode((prev) => {
       const next = { ...prev };
       next[nodeId] = (next[nodeId] ?? []).filter((f) => f.formId !== formId);
+
+      // ✅ 최소 1개는 유지(원하시면 제거 가능)
+      if ((next[nodeId] ?? []).length === 0) {
+        next[nodeId] = [createDefaultUploadForm()];
+      }
       return next;
     });
   }
@@ -454,7 +507,6 @@ export default function ProjectDocumentPage() {
    * (6) Duplicate name check
    * ------------------------------ */
   function checkDuplicateName(nodeId: string, displayName: string): boolean {
-    // 동일 카테고리 내 중복 기준(원하면 프로젝트 전체로 확장 가능)
     const dn = displayName.trim().toLowerCase();
     if (!dn) return false;
     return (filesByNode[nodeId] ?? []).some((f) => f.displayName.trim().toLowerCase() === dn);
@@ -472,7 +524,7 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
-   * (4) File upload
+   * File upload / delete
    * ------------------------------ */
   async function handleUpload(nodeId: string, form: UploadForm) {
     if (!uid || !activeProjectId) {
@@ -495,7 +547,6 @@ export default function ProjectDocumentPage() {
 
     const isDup = checkDuplicateName(nodeId, displayName);
     if (isDup && !version) {
-      // 동일 파일명인데 버전이 없으면 경고
       updateUploadForm(nodeId, form.formId, { duplicateNameWarn: true });
       alert("동일한 파일명이 이미 존재합니다. 버전을 입력해 주세요. (예: v1.1, v2)");
       return;
@@ -503,7 +554,6 @@ export default function ProjectDocumentPage() {
 
     setLoading(true);
     try {
-      // Firestore 문서 먼저 생성(문서 ID 확보)
       const fileRef = await addDoc(collection(db, "project_document_files"), {
         projectId: activeProjectId,
         nodeId,
@@ -516,15 +566,12 @@ export default function ProjectDocumentPage() {
         createdAt: serverTimestamp(),
       });
 
-      // Storage 업로드
       const storagePath = `project_documents/${activeProjectId}/files/${fileRef.id}/${fileObj.name}`;
       const storageRef = ref(storage, storagePath);
       await uploadBytes(storageRef, fileObj);
 
-      // 다운로드 URL
       const downloadUrl = await getDownloadURL(storageRef);
 
-      // Firestore 업데이트
       await updateDoc(doc(db, "project_document_files", fileRef.id), {
         storagePath,
         downloadUrl,
@@ -538,7 +585,7 @@ export default function ProjectDocumentPage() {
         originalName: fileObj.name,
       });
 
-      // 폼 일부 초기화
+      // 폼은 유지하되 파일만 초기화
       updateUploadForm(nodeId, form.formId, { fileObj: null, duplicateNameWarn: false });
 
       await loadProjectAll(activeProjectId);
@@ -555,7 +602,6 @@ export default function ProjectDocumentPage() {
     const target = files.find((f) => f.id === fileId);
     if (!target) return;
 
-    // 연결된 mod가 있으면 먼저 삭제 유도
     const linkedMods = (modsByFile[fileId] ?? []).length;
     if (linkedMods > 0) {
       alert("이 파일에 연결된 Modification List 문서가 있습니다. 먼저 문서를 삭제해 주세요.");
@@ -578,7 +624,7 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
-   * (7) Modification List create/delete
+   * Mod create/delete
    * ------------------------------ */
   async function handleCreateMod(file: FileItem) {
     if (!uid || !activeProjectId) {
@@ -597,7 +643,6 @@ export default function ProjectDocumentPage() {
         createdAt: serverTimestamp(),
       });
 
-      // 템플릿 문서(현재는 md로 생성)
       const content = [
         `# Modification List`,
         ``,
@@ -691,7 +736,7 @@ export default function ProjectDocumentPage() {
             )}
           </div>
 
-          {/* (2)(3) 하위 카테고리 생성 */}
+          {/* 하위 카테고리 생성 */}
           <div className="flex items-center gap-2">
             <input
               className="border rounded px-2 py-1 text-sm w-48 bg-transparent"
@@ -711,7 +756,7 @@ export default function ProjectDocumentPage() {
           </div>
         </div>
 
-        {/* (4)(5)(6) 카테고리 하단: 파일 등록 */}
+        {/* ✅ 카테고리 하단: 파일 등록폼 + 파일 목록 */}
         {node.type === "category" && (
           <div className="mt-4" style={{ paddingLeft: indent }}>
             <div className="flex items-center justify-between mb-2">
@@ -726,6 +771,7 @@ export default function ProjectDocumentPage() {
               </button>
             </div>
 
+            {/* 업로드 폼 */}
             <div className="space-y-3">
               {uploadForms.map((form) => {
                 const isDup = checkDuplicateName(node.id, form.displayName);
@@ -744,7 +790,6 @@ export default function ProjectDocumentPage() {
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                      {/* 파일명 */}
                       <div className="flex flex-col gap-1">
                         <label className="text-xs opacity-70">파일명(표시명)</label>
                         <input
@@ -764,7 +809,6 @@ export default function ProjectDocumentPage() {
                         )}
                       </div>
 
-                      {/* 버전 */}
                       <div className="flex flex-col gap-1">
                         <label className="text-xs opacity-70">버전</label>
                         <input
@@ -776,7 +820,6 @@ export default function ProjectDocumentPage() {
                         />
                       </div>
 
-                      {/* 파일 선택/드롭 */}
                       <div className="flex flex-col gap-1">
                         <label className="text-xs opacity-70">파일</label>
                         <div
@@ -813,10 +856,20 @@ export default function ProjectDocumentPage() {
                 );
               })}
 
-              {uploadForms.length === 0 && <div className="text-sm opacity-70">파일 등록폼을 추가해 주세요.</div>}
+              {/* ✅ 방어: 혹시 폼이 0개면 1개 보여주기 */}
+              {uploadForms.length === 0 && (
+                <button
+                  type="button"
+                  className="px-3 py-2 rounded border text-sm"
+                  onClick={() => ensureOneUploadForm(node.id)}
+                  disabled={loading}
+                >
+                  기본 파일 등록폼 생성
+                </button>
+              )}
             </div>
 
-            {/* 등록된 파일 목록 */}
+            {/* 파일 목록 */}
             <div className="mt-4">
               <div className="text-sm font-medium mb-2">📄 등록된 파일</div>
               {nodeFiles.length === 0 ? (
@@ -848,7 +901,6 @@ export default function ProjectDocumentPage() {
                               </a>
                             )}
 
-                            {/* (7) Mod 생성 */}
                             <button
                               type="button"
                               className="px-3 py-1 rounded border text-sm"
@@ -870,7 +922,6 @@ export default function ProjectDocumentPage() {
                           </div>
                         </div>
 
-                        {/* (8) 생성된 Mod 문서 삭제 */}
                         <div className="mt-3">
                           <div className="text-xs font-semibold opacity-80 mb-1">Modification List</div>
                           {linkedMods.length === 0 ? (
@@ -909,7 +960,7 @@ export default function ProjectDocumentPage() {
           </div>
         )}
 
-        {/* 하위 카테고리 렌더 */}
+        {/* 하위 카테고리 */}
         {childNodes.length > 0 && <div className="mt-3 space-y-3">{childNodes.map((c) => renderNode(c, depth + 1))}</div>}
       </div>
     );
@@ -953,7 +1004,7 @@ export default function ProjectDocumentPage() {
 
       {/* 트리 영역 */}
       {!activeProjectId ? (
-        <div className="text-sm opacity-70">프로젝트를 생성하면 카테고리/파일 등록이 가능합니다.</div>
+        <div className="text-sm opacity-70">프로젝트를 생성하면 기본 카테고리 + 파일 등록폼이 자동 생성됩니다.</div>
       ) : (
         <section>
           {loading && <div className="text-sm opacity-70 mb-3">처리 중...</div>}
