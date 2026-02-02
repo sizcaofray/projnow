@@ -71,7 +71,7 @@ export default function AdminOnlyLinks() {
 
       {/* ✅ SDTM DB Manage */}
       <Link href="/contents/admin/sdtm" className={linkClass}>
-        SDTM DB Manage
+        SDTM DB Manage(개발중)
       </Link>
     </>
   );
