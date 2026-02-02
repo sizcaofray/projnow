@@ -1,16 +1,16 @@
 "use client";
 
 /**
- * projnow/app/contents/project_document/page.tsx
+ * Project Document Page
  *
- * ✅ 변경사항(이번 요청)
- * 1) 프로젝트 생성 시 Default Category 자동 생성 ❌
- * 2) 카테고리명 입력 + "카테고리 생성" 버튼을 눌렀을 때만 카테고리 생성 ✅
- * 3) 카테고리 생성 시 해당 카테고리 하단에 파일 등록폼 1개 자동 생성 ✅(이전 요청 유지)
+ * ✅ 이번 수정 핵심
+ * 1) select 박스 다크모드 가독성 해결:
+ *    - select/option에 bg/text를 명시하여 라이트/다크 모두 정상 표시
  *
- * ✅ 유지(이전 요청)
- * - 버전 입력칸: 1/6
- * - 파일 선택 버튼: 드래그&드롭 박스 내부
+ * 2) 파일 등록 방식 변경(메뉴관리처럼):
+ *    - 파일 항목을 먼저 생성(메타 row 생성)
+ *    - 파일명/버전은 상시 편집 + "저장" 버튼으로 Firestore 업데이트
+ *    - 파일 업로드는 "파일 등록" 버튼 클릭 → 팝업(모달)에서 파일 선택/드롭 → 업로드
  *
  * ⚠️ Firebase env 필요:
  * NEXT_PUBLIC_FIREBASE_API_KEY
@@ -108,11 +108,16 @@ type FileItem = {
   id: string;
   projectId: string;
   nodeId: string;
+
+  /** 사용자가 입력/수정하는 메타 */
   displayName: string;
   version: string;
+
+  /** 업로드 후 채워지는 값 */
   originalName: string;
   storagePath: string;
   downloadUrl?: string;
+
   createdAt?: any;
   createdBy?: string;
   createdByEmail?: string | null;
@@ -133,6 +138,8 @@ type AuditAction =
   | "PROJECT_CREATE"
   | "CATEGORY_CREATE"
   | "CATEGORY_DELETE"
+  | "FILE_META_CREATE"
+  | "FILE_META_UPDATE"
   | "FILE_UPLOAD"
   | "FILE_DELETE"
   | "MOD_CREATE"
@@ -169,16 +176,22 @@ export default function ProjectDocumentPage() {
   const [newCategoryNameByParent, setNewCategoryNameByParent] = useState<Record<string, string>>({});
 
   /** -----------------------------
-   * Upload form UI state (DB 저장 아님)
+   * 파일 메타(인라인 편집) state
+   * - DB 저장된 파일항목을 화면에서 수정하고 저장하기 위한 임시 입력값
    * ------------------------------ */
-  type UploadForm = {
-    formId: string;
+  type FileEditState = {
     displayName: string;
     version: string;
-    fileObj: File | null;
-    duplicateNameWarn: boolean;
   };
-  const [uploadFormsByNode, setUploadFormsByNode] = useState<Record<string, UploadForm[]>>({});
+  const [fileEdits, setFileEdits] = useState<Record<string, FileEditState>>({});
+
+  /** -----------------------------
+   * 파일 업로드 팝업(모달) state
+   * ------------------------------ */
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [uploadTargetFileId, setUploadTargetFileId] = useState<string | null>(null);
+  const [uploadTargetNodeId, setUploadTargetNodeId] = useState<string | null>(null);
+  const [uploadFileObj, setUploadFileObj] = useState<File | null>(null);
 
   /** -----------------------------
    * Effects
@@ -191,11 +204,19 @@ export default function ProjectDocumentPage() {
 
         setMyProjects([]);
         setActiveProjectId(null);
+
         setProject(null);
         setNodes([]);
         setFiles([]);
         setMods([]);
-        setUploadFormsByNode({});
+        setFileEdits({});
+
+        // 모달 상태 초기화
+        setUploadModalOpen(false);
+        setUploadTargetFileId(null);
+        setUploadTargetNodeId(null);
+        setUploadFileObj(null);
+
         return;
       }
 
@@ -219,7 +240,13 @@ export default function ProjectDocumentPage() {
     setNodes([]);
     setFiles([]);
     setMods([]);
-    setUploadFormsByNode({});
+    setFileEdits({});
+
+    // 모달 상태 초기화
+    setUploadModalOpen(false);
+    setUploadTargetFileId(null);
+    setUploadTargetNodeId(null);
+    setUploadFileObj(null);
 
     void loadProjectAll(activeProjectId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -253,6 +280,7 @@ export default function ProjectDocumentPage() {
       map[f.nodeId].push(f);
     }
     for (const k of Object.keys(map)) {
+      // 보기 편하게 정렬(표시명 → 버전)
       map[k].sort((a, b) => (a.displayName + a.version).localeCompare(b.displayName + b.version));
     }
     return map;
@@ -270,20 +298,6 @@ export default function ProjectDocumentPage() {
   /** -----------------------------
    * Helpers
    * ------------------------------ */
-  function makeLocalId(prefix: string) {
-    return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  }
-
-  function createDefaultUploadForm(): UploadForm {
-    return {
-      formId: makeLocalId("form"),
-      displayName: "",
-      version: "",
-      fileObj: null,
-      duplicateNameWarn: false,
-    };
-  }
-
   function tsToMillis(ts: any): number {
     try {
       if (!ts) return 0;
@@ -330,21 +344,21 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
-   * (핵심) 노드가 없는 프로젝트 자동 복구 생성
-   * ✅ 변경: root만 생성하고, category는 생성하지 않음
+   * 노드가 없는 프로젝트 자동 복구 생성(루트만)
    * ------------------------------ */
   async function ensureProjectScaffold(projectId: string, projectNameForRoot: string) {
     if (!uid) return;
 
+    // local에서 root가 이미 있으면 패스
     const hasRootLocal = nodes.some((n) => n.projectId === projectId && n.type === "project");
     if (hasRootLocal) return;
 
-    // DB에서 nodes 직접 확인
+    // DB에서도 확인
     const nodesQ = query(collection(db, "project_document_nodes"), where("projectId", "==", projectId));
     const nSnap = await getDocs(nodesQ);
     if (nSnap.size > 0) return;
 
-    // ✅ root node만 생성
+    // root node만 생성 (카테고리 자동 생성 없음)
     const rootRef = await addDoc(collection(db, "project_document_nodes"), {
       projectId,
       type: "project",
@@ -368,25 +382,49 @@ export default function ProjectDocumentPage() {
   async function loadProjectAll(projectId: string) {
     setLoading(true);
     try {
+      // project
       const pSnap = await getDoc(doc(db, "project_documents", projectId));
       const pDoc = pSnap.exists() ? ({ id: pSnap.id, ...(pSnap.data() as any) } as ProjectDoc) : null;
       setProject(pDoc);
 
+      // nodes
       const nodesQ = query(collection(db, "project_document_nodes"), where("projectId", "==", projectId));
       const nSnap = await getDocs(nodesQ);
       const nListRaw = nSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as TreeNode[];
       const nList = [...nListRaw].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
       setNodes(nList);
 
+      // files
       const filesQ = query(collection(db, "project_document_files"), where("projectId", "==", projectId));
       const fSnap = await getDocs(filesQ);
-      setFiles(fSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as FileItem[]);
+      const fileList = fSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as FileItem[];
+      setFiles(fileList);
 
+      // mods
       const modsQ = query(collection(db, "project_document_mods"), where("projectId", "==", projectId));
       const mSnap = await getDocs(modsQ);
       setMods(mSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as ModDoc[]);
 
-      // root가 없으면 자동 복구 후 다시 로드
+      // ✅ 파일 인라인 편집값 초기화(불러온 파일 기준)
+      setFileEdits((prev) => {
+        const next = { ...prev };
+        for (const f of fileList) {
+          // 이미 편집 중인 값이 있으면 유지, 없으면 DB값으로 세팅
+          if (!next[f.id]) {
+            next[f.id] = {
+              displayName: f.displayName ?? "",
+              version: f.version ?? "",
+            };
+          }
+        }
+        // 삭제된 파일은 edit state에서도 제거(안정성)
+        for (const k of Object.keys(next)) {
+          if (!fileList.some((f) => f.id === k)) delete next[k];
+        }
+        return next;
+      });
+
+      // root 없으면 자동복구 후 다시 로드
       const hasRoot = nList.some((n) => n.type === "project");
       if (!hasRoot) {
         await ensureProjectScaffold(projectId, pDoc?.name ?? "Project");
@@ -405,8 +443,7 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
-   * 프로젝트 생성
-   * ✅ 변경: Default Category 생성하지 않음
+   * 프로젝트 생성 (카테고리 자동 생성 없음)
    * ------------------------------ */
   async function handleCreateProject() {
     if (!uid) {
@@ -442,7 +479,6 @@ export default function ProjectDocumentPage() {
         createdAt: serverTimestamp(),
       });
 
-      // 감사로그
       await writeAudit(projectRef.id, "PROJECT_CREATE", { name, rootNodeId: rootRef.id });
 
       // 셀렉트 즉시 반영 + 자동 선택
@@ -471,7 +507,6 @@ export default function ProjectDocumentPage() {
 
   /** -----------------------------
    * 카테고리 생성/삭제
-   * ✅ 카테고리 생성 시 해당 카테고리 하단에 폼 1개 자동 생성 유지
    * ------------------------------ */
   async function handleAddCategory(parentId: string) {
     if (!uid || !activeProjectId) {
@@ -502,12 +537,6 @@ export default function ProjectDocumentPage() {
 
       await writeAudit(activeProjectId, "CATEGORY_CREATE", { nodeId: nodeRef.id, parentId, name });
 
-      // ✅ 카테고리 생성 버튼을 눌렀을 때 등록폼 1개 자동 생성
-      setUploadFormsByNode((prev) => ({
-        ...prev,
-        [nodeRef.id]: [createDefaultUploadForm()],
-      }));
-
       setNewCategoryNameByParent((prev) => ({ ...prev, [parentId]: "" }));
       await loadProjectAll(activeProjectId);
     } finally {
@@ -534,13 +563,6 @@ export default function ProjectDocumentPage() {
     try {
       await deleteDoc(doc(db, "project_document_nodes", nodeId));
       await writeAudit(activeProjectId, "CATEGORY_DELETE", { nodeId });
-
-      setUploadFormsByNode((prev) => {
-        const next = { ...prev };
-        delete next[nodeId];
-        return next;
-      });
-
       await loadProjectAll(activeProjectId);
     } finally {
       setLoading(false);
@@ -548,112 +570,70 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
-   * Upload form handlers
+   * 파일 항목(메타 row) 추가/저장/삭제
+   * - "파일 등록"은 모달에서 수행
    * ------------------------------ */
-  function addUploadForm(nodeId: string) {
-    setUploadFormsByNode((prev) => {
-      const next = { ...prev };
-      const arr = next[nodeId] ? [...next[nodeId]] : [];
-      arr.push(createDefaultUploadForm());
-      next[nodeId] = arr;
-      return next;
-    });
-  }
-
-  function removeUploadForm(nodeId: string, formId: string) {
-    setUploadFormsByNode((prev) => {
-      const next = { ...prev };
-      next[nodeId] = (next[nodeId] ?? []).filter((f) => f.formId !== formId);
-      return next;
-    });
-  }
-
-  function updateUploadForm(nodeId: string, formId: string, patch: Partial<any>) {
-    setUploadFormsByNode((prev) => {
-      const next = { ...prev };
-      const arr = next[nodeId] ? [...next[nodeId]] : [];
-      next[nodeId] = arr.map((f) => (f.formId === formId ? { ...f, ...patch } : f));
-      return next;
-    });
-  }
-
-  function checkDuplicateName(nodeId: string, displayName: string): boolean {
-    const dn = displayName.trim().toLowerCase();
-    if (!dn) return false;
-    return (filesByNode[nodeId] ?? []).some((f) => f.displayName.trim().toLowerCase() === dn);
-  }
-
-  function handleDrop(nodeId: string, formId: string, e: React.DragEvent<HTMLDivElement>) {
-    e.preventDefault();
-    e.stopPropagation();
-    const file = e.dataTransfer.files?.[0] ?? null;
-    if (!file) return;
-    updateUploadForm(nodeId, formId, { fileObj: file });
-  }
-
-  /** -----------------------------
-   * File upload / delete
-   * ------------------------------ */
-  async function handleUpload(nodeId: string, form: any) {
+  async function handleAddFileMeta(nodeId: string) {
     if (!uid || !activeProjectId) {
       alert("로그인이 필요합니다.");
       return;
     }
 
-    const displayName = (form.displayName ?? "").trim();
-    const version = (form.version ?? "").trim();
-    const fileObj: File | null = form.fileObj ?? null;
-
-    if (!displayName) {
-      alert("파일명을 입력해 주세요.");
-      return;
-    }
-    if (!fileObj) {
-      alert("업로드할 파일을 선택하거나 드래그하여 추가해 주세요.");
-      return;
-    }
-
-    const isDup = checkDuplicateName(nodeId, displayName);
-    if (isDup && !version) {
-      updateUploadForm(nodeId, form.formId, { duplicateNameWarn: true });
-      alert("동일한 파일명이 이미 존재합니다. 버전을 입력해 주세요. (예: v1.1, v2)");
-      return;
-    }
-
     setLoading(true);
     try {
+      // 파일 메타만 먼저 생성(업로드는 나중에)
       const fileRef = await addDoc(collection(db, "project_document_files"), {
         projectId: activeProjectId,
         nodeId,
-        displayName,
-        version: version || "",
-        originalName: fileObj.name,
+        displayName: "",
+        version: "",
+        originalName: "",
         storagePath: "",
+        downloadUrl: "",
         createdBy: uid,
         createdByEmail: userEmail ?? null,
         createdAt: serverTimestamp(),
       });
 
-      const storagePath = `project_documents/${activeProjectId}/files/${fileRef.id}/${fileObj.name}`;
-      const storageRef = ref(storage, storagePath);
-      await uploadBytes(storageRef, fileObj);
+      await writeAudit(activeProjectId, "FILE_META_CREATE", { fileId: fileRef.id, nodeId });
 
-      const downloadUrl = await getDownloadURL(storageRef);
+      // 편집 상태 초기값 세팅
+      setFileEdits((prev) => ({
+        ...prev,
+        [fileRef.id]: { displayName: "", version: "" },
+      }));
 
-      await updateDoc(doc(db, "project_document_files", fileRef.id), {
-        storagePath,
-        downloadUrl,
+      await loadProjectAll(activeProjectId);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSaveFileMeta(fileId: string) {
+    if (!uid || !activeProjectId) {
+      alert("로그인이 필요합니다.");
+      return;
+    }
+
+    const edit = fileEdits[fileId];
+    if (!edit) return;
+
+    // 파일명은 필수로 강제(원하시면 버전도 필수 가능)
+    const dn = (edit.displayName ?? "").trim();
+    if (!dn) {
+      alert("파일명을 입력해 주세요.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await updateDoc(doc(db, "project_document_files", fileId), {
+        displayName: dn,
+        version: (edit.version ?? "").trim(),
       });
 
-      await writeAudit(activeProjectId, "FILE_UPLOAD", {
-        fileId: fileRef.id,
-        nodeId,
-        displayName,
-        version: version || "",
-        originalName: fileObj.name,
-      });
+      await writeAudit(activeProjectId, "FILE_META_UPDATE", { fileId, displayName: dn, version: (edit.version ?? "").trim() });
 
-      updateUploadForm(nodeId, form.formId, { fileObj: null, duplicateNameWarn: false });
       await loadProjectAll(activeProjectId);
     } finally {
       setLoading(false);
@@ -665,8 +645,9 @@ export default function ProjectDocumentPage() {
       alert("로그인이 필요합니다.");
       return;
     }
-    const target = files.find((f) => f.id === fileId);
-    if (!target) return;
+
+    const showTarget = files.find((f) => f.id === fileId);
+    if (!showTarget) return;
 
     const linkedMods = (modsByFile[fileId] ?? []).length;
     if (linkedMods > 0) {
@@ -674,15 +655,30 @@ export default function ProjectDocumentPage() {
       return;
     }
 
-    if (!confirm("파일을 삭제하시겠습니까?")) return;
+    if (!confirm("파일 항목을 삭제하시겠습니까? (업로드된 파일이 있으면 스토리지에서도 삭제됩니다)")) return;
 
     setLoading(true);
     try {
-      if (target.storagePath) {
-        await deleteObject(ref(storage, target.storagePath));
+      // 업로드된 파일이 있으면 스토리지도 삭제
+      if (showTarget.storagePath) {
+        try {
+          await deleteObject(ref(storage, showTarget.storagePath));
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn("[ProjectDocument] storage delete failed (ignore):", e);
+        }
       }
+
       await deleteDoc(doc(db, "project_document_files", fileId));
       await writeAudit(activeProjectId, "FILE_DELETE", { fileId });
+
+      // 편집 상태도 제거
+      setFileEdits((prev) => {
+        const next = { ...prev };
+        delete next[fileId];
+        return next;
+      });
+
       await loadProjectAll(activeProjectId);
     } finally {
       setLoading(false);
@@ -690,7 +686,101 @@ export default function ProjectDocumentPage() {
   }
 
   /** -----------------------------
-   * Mod create/delete
+   * 파일 업로드 모달 open/close
+   * ------------------------------ */
+  function openUploadModal(fileId: string, nodeId: string) {
+    setUploadTargetFileId(fileId);
+    setUploadTargetNodeId(nodeId);
+    setUploadFileObj(null);
+    setUploadModalOpen(true);
+  }
+
+  function closeUploadModal() {
+    setUploadModalOpen(false);
+    setUploadTargetFileId(null);
+    setUploadTargetNodeId(null);
+    setUploadFileObj(null);
+  }
+
+  function handleModalDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    const file = e.dataTransfer.files?.[0] ?? null;
+    if (!file) return;
+    setUploadFileObj(file);
+  }
+
+  /** -----------------------------
+   * 실제 파일 업로드(모달에서 수행)
+   * ------------------------------ */
+  async function handleUploadInModal() {
+    if (!uid || !activeProjectId) {
+      alert("로그인이 필요합니다.");
+      return;
+    }
+    if (!uploadTargetFileId || !uploadTargetNodeId) return;
+
+    const targetFile = files.find((f) => f.id === uploadTargetFileId);
+    if (!targetFile) {
+      alert("업로드 대상 파일 항목을 찾을 수 없습니다. 새로고침 후 다시 시도해 주세요.");
+      return;
+    }
+
+    // ✅ 파일명(메타)이 먼저 저장되어 있어야 한다: 메뉴관리 방식
+    const edit = fileEdits[uploadTargetFileId];
+    const dn = (edit?.displayName ?? targetFile.displayName ?? "").trim();
+    if (!dn) {
+      alert("먼저 파일명을 입력하고 '저장'을 눌러 주세요.");
+      return;
+    }
+
+    if (!uploadFileObj) {
+      alert("업로드할 파일을 선택하거나 드래그하여 추가해 주세요.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      // 기존 업로드가 있으면 교체 업로드 가능하도록 기존 파일 삭제 시도(실패해도 진행)
+      if (targetFile.storagePath) {
+        try {
+          await deleteObject(ref(storage, targetFile.storagePath));
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn("[ProjectDocument] old storage delete failed (ignore):", e);
+        }
+      }
+
+      // storage path: fileId 기준으로 보관
+      const storagePath = `project_documents/${activeProjectId}/files/${uploadTargetFileId}/${uploadFileObj.name}`;
+      const storageRef = ref(storage, storagePath);
+
+      await uploadBytes(storageRef, uploadFileObj);
+      const downloadUrl = await getDownloadURL(storageRef);
+
+      // 업로드 정보 Firestore 업데이트
+      await updateDoc(doc(db, "project_document_files", uploadTargetFileId), {
+        originalName: uploadFileObj.name,
+        storagePath,
+        downloadUrl,
+      });
+
+      await writeAudit(activeProjectId, "FILE_UPLOAD", {
+        fileId: uploadTargetFileId,
+        nodeId: uploadTargetNodeId,
+        originalName: uploadFileObj.name,
+        storagePath,
+      });
+
+      closeUploadModal();
+      await loadProjectAll(activeProjectId);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /** -----------------------------
+   * Modification List 생성/삭제
    * ------------------------------ */
   async function handleCreateMod(file: FileItem) {
     if (!uid || !activeProjectId) {
@@ -709,13 +799,14 @@ export default function ProjectDocumentPage() {
         createdAt: serverTimestamp(),
       });
 
+      // markdown 기본 템플릿 생성
       const content = [
         `# Modification List`,
         ``,
         `- ProjectId: ${activeProjectId}`,
         `- File: ${file.displayName}`,
         `- Version: ${file.version || "(none)"}`,
-        `- Original: ${file.originalName}`,
+        `- Original: ${file.originalName || "(not uploaded yet)"}`,
         `- CreatedAt: ${new Date().toISOString()}`,
         ``,
         `## Changes`,
@@ -774,7 +865,6 @@ export default function ProjectDocumentPage() {
   function renderNode(node: TreeNode, depth: number) {
     const childNodes = nodesByParent[node.id] ?? [];
     const nodeFiles = filesByNode[node.id] ?? [];
-    const uploadForms = uploadFormsByNode[node.id] ?? [];
     const indent = Math.min(depth * 16, 64);
 
     return (
@@ -784,6 +874,7 @@ export default function ProjectDocumentPage() {
             <span className="text-sm font-semibold">
               {node.type === "project" ? "📌 Project" : "📁 Category"}: {node.name}
             </span>
+
             {node.type === "category" && (
               <button
                 type="button"
@@ -797,6 +888,7 @@ export default function ProjectDocumentPage() {
             )}
           </div>
 
+          {/* ✅ 카테고리 생성 UI는 project/ category 모두에 동일하게 제공(하위 생성 가능) */}
           <div className="flex items-center gap-2">
             <input
               className="border rounded px-2 py-1 text-sm w-48 bg-transparent"
@@ -811,165 +903,151 @@ export default function ProjectDocumentPage() {
           </div>
         </div>
 
+        {/* ✅ 카테고리 노드에만 파일 관리 표시 */}
         {node.type === "category" && (
           <div className="mt-4" style={{ paddingLeft: indent }}>
             <div className="flex items-center justify-between mb-2">
-              <div className="text-sm font-medium">📎 파일 등록</div>
-              <button type="button" className="px-3 py-1 rounded border text-sm" onClick={() => addUploadForm(node.id)} disabled={loading}>
-                + 파일 등록폼 추가
+              <div className="text-sm font-medium">📎 파일 관리</div>
+
+              {/* ✅ 메뉴관리처럼: 파일 항목 row를 먼저 생성 */}
+              <button
+                type="button"
+                className="px-3 py-1 rounded border text-sm"
+                onClick={() => handleAddFileMeta(node.id)}
+                disabled={loading}
+                title="파일 항목(메타)을 먼저 만들고, 파일 업로드는 팝업에서 진행합니다."
+              >
+                + 파일 항목 추가
               </button>
             </div>
 
-            <div className="space-y-3">
-              {uploadForms.length === 0 ? (
-                <div className="text-sm opacity-70">등록 폼이 없습니다. 우측의 “+ 파일 등록폼 추가”로 생성해 주세요.</div>
-              ) : null}
+            {nodeFiles.length === 0 ? (
+              <div className="text-sm opacity-70">등록된 파일 항목이 없습니다. 우측의 “+ 파일 항목 추가”로 생성해 주세요.</div>
+            ) : (
+              <div className="space-y-2">
+                {nodeFiles.map((f) => {
+                  const edit = fileEdits[f.id] ?? { displayName: f.displayName ?? "", version: f.version ?? "" };
+                  const linkedMods = modsByFile[f.id] ?? [];
 
-              {uploadForms.map((form: any) => {
-                const isDup = checkDuplicateName(node.id, form.displayName);
-                const fileInputId = `file_${form.formId}`;
-
-                return (
-                  <div key={form.formId} className="border rounded p-3 bg-white dark:bg-black/30">
-                    <div className="flex items-center justify-between gap-3 mb-2">
-                      <div className="text-sm font-semibold">등록 폼</div>
-                      <button type="button" className="text-xs px-2 py-1 rounded border" onClick={() => removeUploadForm(node.id, form.formId)} disabled={loading}>
-                        폼 제거
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
-                      <div className="flex flex-col gap-1 md:col-span-3">
-                        <label className="text-xs opacity-70">파일명(표시명)</label>
-                        <input
-                          className="border rounded px-2 py-2 text-sm bg-transparent"
-                          placeholder="예: CRF Specification"
-                          value={form.displayName}
-                          onChange={(e) => updateUploadForm(node.id, form.formId, { displayName: e.target.value, duplicateNameWarn: false })}
-                          disabled={loading}
-                        />
-                        {(isDup || form.duplicateNameWarn) && <div className="text-xs text-red-600">동일 파일명이 존재합니다. 버전을 입력해 주세요.</div>}
-                      </div>
-
-                      <div className="flex flex-col gap-1 md:col-span-1">
-                        <label className="text-xs opacity-70">버전</label>
-                        <input
-                          className="border rounded px-2 py-2 text-sm bg-transparent"
-                          placeholder="v1.0"
-                          value={form.version}
-                          onChange={(e) => updateUploadForm(node.id, form.formId, { version: e.target.value })}
-                          disabled={loading}
-                        />
-                      </div>
-
-                      <div className="flex flex-col gap-1 md:col-span-2">
-                        <label className="text-xs opacity-70">파일</label>
-
-                        <div
-                          className="border rounded px-2 py-2 text-sm bg-transparent"
-                          onDragOver={(e) => e.preventDefault()}
-                          onDrop={(e) => handleDrop(node.id, form.formId, e)}
-                          title="여기에 파일을 드래그&드롭하거나, 박스 안의 파일 선택 버튼을 누르세요."
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="truncate">{form.fileObj ? `선택됨: ${form.fileObj.name}` : "여기로 드래그&드롭"}</div>
-
-                            <label htmlFor={fileInputId} className="px-2 py-1 rounded border text-xs cursor-pointer whitespace-nowrap" title="파일 선택">
-                              파일 선택
-                            </label>
-
-                            <input
-                              id={fileInputId}
-                              type="file"
-                              className="hidden"
-                              onChange={(e) => updateUploadForm(node.id, form.formId, { fileObj: e.target.files?.[0] ?? null })}
-                              disabled={loading}
-                            />
-                          </div>
+                  return (
+                    <div key={f.id} className="border rounded p-3 bg-white dark:bg-black/30">
+                      {/* 상단: 메타 편집(파일명/버전) + 저장 */}
+                      <div className="grid grid-cols-1 md:grid-cols-6 gap-2 items-end">
+                        {/* 파일명 - 3/6 */}
+                        <div className="flex flex-col gap-1 md:col-span-3">
+                          <label className="text-xs opacity-70">파일명(표시명)</label>
+                          <input
+                            className="border rounded px-2 py-2 text-sm bg-transparent"
+                            placeholder="예: CRF Specification"
+                            value={edit.displayName}
+                            onChange={(e) =>
+                              setFileEdits((prev) => ({
+                                ...prev,
+                                [f.id]: { ...prev[f.id], displayName: e.target.value },
+                              }))
+                            }
+                            disabled={loading}
+                          />
                         </div>
 
-                        <div className="text-xs opacity-70">{form.fileObj ? "선택된 파일 있음" : "선택된 파일 없음"}</div>
-                      </div>
-                    </div>
-
-                    <div className="flex gap-2 mt-3">
-                      <button type="button" className="px-3 py-2 rounded border text-sm" onClick={() => handleUpload(node.id, form)} disabled={loading}>
-                        업로드
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="mt-4">
-              <div className="text-sm font-medium mb-2">📄 등록된 파일</div>
-              {nodeFiles.length === 0 ? (
-                <div className="text-sm opacity-70">등록된 파일이 없습니다.</div>
-              ) : (
-                <div className="space-y-2">
-                  {nodeFiles.map((f) => {
-                    const linkedMods = modsByFile[f.id] ?? [];
-                    return (
-                      <div key={f.id} className="border rounded p-3 bg-white dark:bg-black/30">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="text-sm">
-                            <div className="font-semibold">
-                              {f.displayName} {f.version ? <span className="text-xs opacity-70">({f.version})</span> : null}
-                            </div>
-                            <div className="text-xs opacity-70">원본 파일: {f.originalName}</div>
-                          </div>
-
-                          <div className="flex flex-wrap gap-2">
-                            {f.downloadUrl && (
-                              <a className="px-3 py-1 rounded border text-sm" href={f.downloadUrl} target="_blank" rel="noreferrer">
-                                다운로드
-                              </a>
-                            )}
-
-                            <button type="button" className="px-3 py-1 rounded border text-sm" onClick={() => handleCreateMod(f)} disabled={loading}>
-                              + Modification List 생성
-                            </button>
-
-                            <button type="button" className="px-3 py-1 rounded border text-sm" onClick={() => handleDeleteFile(f.id)} disabled={loading}>
-                              파일 삭제
-                            </button>
-                          </div>
+                        {/* 버전 - 1/6 */}
+                        <div className="flex flex-col gap-1 md:col-span-1">
+                          <label className="text-xs opacity-70">버전</label>
+                          <input
+                            className="border rounded px-2 py-2 text-sm bg-transparent"
+                            placeholder="v1.0"
+                            value={edit.version}
+                            onChange={(e) =>
+                              setFileEdits((prev) => ({
+                                ...prev,
+                                [f.id]: { ...prev[f.id], version: e.target.value },
+                              }))
+                            }
+                            disabled={loading}
+                          />
                         </div>
 
-                        <div className="mt-3">
-                          <div className="text-xs font-semibold opacity-80 mb-1">Modification List</div>
-                          {linkedMods.length === 0 ? (
-                            <div className="text-xs opacity-70">생성된 문서가 없습니다.</div>
+                        {/* 저장/삭제 - 2/6 */}
+                        <div className="flex gap-2 md:col-span-2">
+                          <button type="button" className="px-3 py-2 rounded border text-sm" onClick={() => handleSaveFileMeta(f.id)} disabled={loading}>
+                            저장
+                          </button>
+                          <button type="button" className="px-3 py-2 rounded border text-sm" onClick={() => handleDeleteFile(f.id)} disabled={loading}>
+                            삭제
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* 업로드/다운로드 영역 */}
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-xs opacity-70">
+                          {f.originalName ? (
+                            <>
+                              원본: <span className="opacity-90">{f.originalName}</span>
+                            </>
                           ) : (
-                            <div className="space-y-1">
-                              {linkedMods.map((m) => (
-                                <div key={m.id} className="flex items-center justify-between gap-2 text-xs">
-                                  <div className="flex items-center gap-2">
-                                    <span>📄 {m.id}.md</span>
-                                    {m.downloadUrl && (
-                                      <a href={m.downloadUrl} target="_blank" rel="noreferrer" className="underline">
-                                        다운로드
-                                      </a>
-                                    )}
-                                  </div>
-                                  <button type="button" className="px-2 py-1 rounded border" onClick={() => handleDeleteMod(m.id)} disabled={loading}>
-                                    문서 삭제
-                                  </button>
-                                </div>
-                              ))}
-                            </div>
+                            "업로드된 파일 없음"
                           )}
                         </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          {f.downloadUrl ? (
+                            <a className="px-3 py-1 rounded border text-sm" href={f.downloadUrl} target="_blank" rel="noreferrer">
+                              다운로드
+                            </a>
+                          ) : null}
+
+                          {/* ✅ 파일 등록(업로드)은 팝업에서 */}
+                          <button
+                            type="button"
+                            className="px-3 py-1 rounded border text-sm"
+                            onClick={() => openUploadModal(f.id, f.nodeId)}
+                            disabled={loading}
+                            title="팝업에서 파일을 선택/드래그하여 업로드합니다."
+                          >
+                            파일 등록
+                          </button>
+
+                          <button type="button" className="px-3 py-1 rounded border text-sm" onClick={() => handleCreateMod(f)} disabled={loading}>
+                            + Modification List 생성
+                          </button>
+                        </div>
                       </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+
+                      {/* Modification List 리스트 */}
+                      <div className="mt-3">
+                        <div className="text-xs font-semibold opacity-80 mb-1">Modification List</div>
+                        {linkedMods.length === 0 ? (
+                          <div className="text-xs opacity-70">생성된 문서가 없습니다.</div>
+                        ) : (
+                          <div className="space-y-1">
+                            {linkedMods.map((m) => (
+                              <div key={m.id} className="flex items-center justify-between gap-2 text-xs">
+                                <div className="flex items-center gap-2">
+                                  <span>📄 {m.id}.md</span>
+                                  {m.downloadUrl ? (
+                                    <a href={m.downloadUrl} target="_blank" rel="noreferrer" className="underline">
+                                      다운로드
+                                    </a>
+                                  ) : null}
+                                </div>
+                                <button type="button" className="px-2 py-1 rounded border" onClick={() => handleDeleteMod(m.id)} disabled={loading}>
+                                  문서 삭제
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
+        {/* 자식 노드 렌더 */}
         {childNodes.length > 0 && <div className="mt-3 space-y-3">{childNodes.map((c) => renderNode(c, depth + 1))}</div>}
       </div>
     );
@@ -980,28 +1058,35 @@ export default function ProjectDocumentPage() {
    * ------------------------------ */
   return (
     <main className="p-6">
+      {/* 제목 */}
       <div className="flex items-center justify-between gap-3 mb-6">
         <h1 className="text-xl font-bold">Project Document</h1>
         <div className="text-xs opacity-70">{uid ? `로그인: ${userEmail ?? uid}` : "비로그인"}</div>
       </div>
 
+      {/* 상단: 프로젝트 선택/생성 */}
       <section className="border rounded-md p-4 mb-6 bg-white/50 dark:bg-black/20">
         <div className="flex flex-col md:flex-row gap-3 items-start md:items-end justify-between">
           <div className="flex flex-col gap-2">
             <div className="text-sm font-semibold">내 프로젝트</div>
+
+            {/* ✅ 다크/라이트 모두 가독성 확보: bg/text 명시 + option도 명시 */}
             <select
-              className="border rounded px-3 py-2 w-full md:w-[420px] bg-transparent"
+              className="border rounded px-3 py-2 w-full md:w-[420px] bg-white text-black dark:bg-slate-900 dark:text-white"
               value={activeProjectId ?? ""}
               onChange={(e) => setActiveProjectId(e.target.value || null)}
               disabled={loading || !uid}
             >
-              <option value="">(프로젝트 선택)</option>
+              <option className="bg-white text-black dark:bg-slate-900 dark:text-white" value="">
+                (프로젝트 선택)
+              </option>
               {myProjects.map((p) => (
-                <option key={p.id} value={p.id}>
+                <option key={p.id} value={p.id} className="bg-white text-black dark:bg-slate-900 dark:text-white">
                   {p.name} ({p.id})
                 </option>
               ))}
             </select>
+
             <div className="text-xs opacity-70">저장 시 목록에 즉시 반영됩니다.</div>
           </div>
 
@@ -1028,11 +1113,13 @@ export default function ProjectDocumentPage() {
         </div>
       </section>
 
+      {/* 본문 */}
       {!activeProjectId ? (
         <div className="text-sm opacity-70">프로젝트를 선택(또는 생성)하면 하위 문서 트리가 표시됩니다.</div>
       ) : (
         <section>
           {loading && <div className="text-sm opacity-70 mb-3">처리 중...</div>}
+
           {!rootNodeId ? (
             <div className="text-sm opacity-70">프로젝트 노드를 불러오지 못했습니다. (노드가 없으면 자동 복구 생성됩니다)</div>
           ) : (
@@ -1040,6 +1127,62 @@ export default function ProjectDocumentPage() {
           )}
         </section>
       )}
+
+      {/* ✅ 파일 업로드 팝업(모달) */}
+      {uploadModalOpen ? (
+        <div className="fixed inset-0 z-[999] flex items-center justify-center">
+          {/* 배경 */}
+          <div className="absolute inset-0 bg-black/60" onClick={closeUploadModal} />
+
+          {/* 본체 */}
+          <div className="relative w-[92vw] max-w-xl border rounded-lg bg-white text-black dark:bg-slate-950 dark:text-white p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="font-semibold">파일 등록</div>
+              <button type="button" className="px-2 py-1 rounded border text-sm" onClick={closeUploadModal} disabled={loading}>
+                닫기
+              </button>
+            </div>
+
+            <div className="text-xs opacity-70 mb-3">
+              파일은 여기에서 업로드됩니다. (파일명/버전은 인라인에서 입력 후 저장하세요)
+            </div>
+
+            {/* 드래그&드롭 박스 + 파일 선택 */}
+            <div
+              className="border rounded p-3 text-sm bg-transparent"
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={handleModalDrop}
+              title="여기에 파일을 드래그&드롭하거나, 아래 버튼으로 선택하세요."
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="truncate">{uploadFileObj ? `선택됨: ${uploadFileObj.name}` : "여기로 드래그&드롭"}</div>
+
+                <label htmlFor="modal_file_input" className="px-2 py-1 rounded border text-xs cursor-pointer whitespace-nowrap">
+                  파일 선택
+                </label>
+                <input
+                  id="modal_file_input"
+                  type="file"
+                  className="hidden"
+                  onChange={(e) => setUploadFileObj(e.target.files?.[0] ?? null)}
+                  disabled={loading}
+                />
+              </div>
+            </div>
+
+            <div className="text-xs opacity-70 mt-2">{uploadFileObj ? "선택된 파일 있음" : "선택된 파일 없음"}</div>
+
+            <div className="flex gap-2 mt-4">
+              <button type="button" className="px-4 py-2 rounded border text-sm" onClick={handleUploadInModal} disabled={loading}>
+                업로드
+              </button>
+              <button type="button" className="px-4 py-2 rounded border text-sm" onClick={closeUploadModal} disabled={loading}>
+                취소
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
