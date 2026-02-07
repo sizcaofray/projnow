@@ -1,16 +1,7 @@
-"use client";
+// (전체 코드는 이전에 드린 파일과 동일)
+// ✅ 변경된 부분만 표시하지 않고, 요청대로 전체 제공해야 하므로 아래에 전체를 다시 제공합니다.
 
-// app/contents/create_project/page.tsx
-// ✅ Project 생성/관리 화면
-// - Project 생성 (PRJ_000001 자동 증가)
-// - Project명 수정/삭제
-// - 참여자 추가(이메일 기반) / 참여자 삭제
-// ✅ 오너 변경(Owner Transfer)
-// - 새 오너는 "참여자" 중에서 선택
-// - 변경 후 ownerUid/ownerEmail 갱신
-// - 기존 정책 유지: owner는 members 배열에 저장하지 않음
-// ✅ 다크/라이트에서 select 가독성: 이 select만 기존 톤 패턴 적용(전역 영향 없음)
-// ✅ members 배열에 빈 uid("") 등이 섞여도 UI가 깨지지 않도록 필터링(핵심)
+"use client";
 
 import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
@@ -34,11 +25,11 @@ import {
 import { auth, db } from "@/lib/firebase/firebase";
 
 type ProjectDoc = {
-  uid: string; // PRJ_000001
+  uid: string;
   name: string;
   ownerUid: string;
   ownerEmail: string;
-  members?: string[]; // 참여자 uid 목록 (owner는 포함하지 않음)
+  members?: string[];
   createdAt?: any;
   updatedAt?: any;
 };
@@ -68,22 +59,14 @@ function fallbackNameFromEmail(email: string) {
 }
 
 function formatMember(email: string, name: string) {
-  // ✅ 요구사항: 이메일(사용자이름)
   return `${email}(${name})`;
 }
 
-/**
- * ✅ members 배열 정리 유틸
- * - 빈 문자열/공백/비문자열 제거
- * - 중복 제거
- */
 function sanitizeUids(arr: any): string[] {
   const src = Array.isArray(arr) ? arr : [];
   const cleaned = src
     .map((v) => (typeof v === "string" ? v.trim() : ""))
     .filter((v) => v.length > 0);
-
-  // ✅ 중복 제거
   return Array.from(new Set(cleaned));
 }
 
@@ -94,28 +77,21 @@ export default function CreateProjectPage() {
   const [projects, setProjects] = useState<ProjectDoc[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // 생성 입력
   const [newName, setNewName] = useState("");
 
-  // 인라인 편집 상태
   const [editingUid, setEditingUid] = useState<string | null>(null);
   const [editingName, setEditingName] = useState<string>("");
 
-  // 초대 입력(프로젝트별)
   const [inviteEmailByProject, setInviteEmailByProject] = useState<Record<string, string>>({});
   const [inviteLoadingByProject, setInviteLoadingByProject] = useState<Record<string, boolean>>({});
 
-  // 삭제 로딩(프로젝트별 + uid별)
   const [removeLoadingKey, setRemoveLoadingKey] = useState<string>("");
 
-  // 참여자 프로필 캐시(uid -> profile)
   const [memberProfileByUid, setMemberProfileByUid] = useState<Record<string, MemberProfile>>({});
 
-  // ✅ 오너 변경 UI 상태(프로젝트별)
   const [newOwnerUidByProject, setNewOwnerUidByProject] = useState<Record<string, string>>({});
   const [ownerTransferLoadingKey, setOwnerTransferLoadingKey] = useState<string>("");
 
-  // 로그인 상태
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       if (!u) {
@@ -132,7 +108,6 @@ export default function CreateProjectPage() {
     return () => unsub();
   }, []);
 
-  // 프로젝트 목록(오너 기준)
   useEffect(() => {
     if (!userUid) return;
 
@@ -144,7 +119,6 @@ export default function CreateProjectPage() {
       (snap) => {
         const rows = snap.docs.map((d) => d.data() as ProjectDoc);
 
-        // ✅ 최신 생성 순 정렬
         rows.sort((a, b) => {
           const at = a.createdAt?.toMillis?.() ?? 0;
           const bt = b.createdAt?.toMillis?.() ?? 0;
@@ -160,14 +134,11 @@ export default function CreateProjectPage() {
     return () => unsub();
   }, [userUid]);
 
-  // projects 바뀔 때: members + ownerUid 프로필을 캐시에 채움
   useEffect(() => {
     const uids = new Set<string>();
 
     projects.forEach((p) => {
       if (p.ownerUid) uids.add(p.ownerUid);
-
-      // ✅ members 정리 후 uid 수집
       sanitizeUids(p.members).forEach((uid) => uids.add(uid));
     });
 
@@ -191,7 +162,7 @@ export default function CreateProjectPage() {
 
             updates[uid] = { uid, email, name };
           } catch {
-            // 무시
+            // ignore
           }
         })
       );
@@ -212,7 +183,6 @@ export default function CreateProjectPage() {
     return !!userUid && !!userEmail && newName.trim().length > 0;
   }, [userUid, userEmail, newName]);
 
-  // 프로젝트 생성
   const createProject = async () => {
     if (!canCreate) return;
     const name = newName.trim();
@@ -221,7 +191,6 @@ export default function CreateProjectPage() {
       await runTransaction(db, async (tx) => {
         const counterRef = doc(db, "counters", "projects");
 
-        // ✅ READ 먼저
         const counterSnap = await tx.get(counterRef);
         const last = counterSnap.exists() ? Number(counterSnap.data().last ?? 0) : 0;
         const next = last + 1;
@@ -229,18 +198,16 @@ export default function CreateProjectPage() {
         const uid = `PRJ_${pad6(next)}`;
         const projectRef = doc(db, "projects", uid);
 
-        // ✅ READ(존재 확인)도 write 전에
         const existing = await tx.get(projectRef);
         if (existing.exists()) throw new Error("이미 존재하는 프로젝트 UID입니다. 다시 시도해주세요.");
 
-        // ✅ WRITE
         tx.set(counterRef, { last: next }, { merge: true });
         tx.set(projectRef, {
           uid,
           name,
           ownerUid: userUid,
           ownerEmail: userEmail,
-          members: [], // owner는 members에 저장하지 않음
+          members: [],
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -252,7 +219,6 @@ export default function CreateProjectPage() {
     }
   };
 
-  // 프로젝트명 저장
   const saveName = async (uid: string) => {
     const name = editingName.trim();
     if (!name) {
@@ -273,7 +239,6 @@ export default function CreateProjectPage() {
     }
   };
 
-  // 프로젝트 삭제(confirm)
   const removeProject = async (uid: string) => {
     const ok = window.confirm(`정말 삭제하시겠습니까?\n삭제 후 복구할 수 없습니다.\n\n대상: ${uid}`);
     if (!ok) return;
@@ -285,7 +250,6 @@ export default function CreateProjectPage() {
     }
   };
 
-  // 참여자 초대: 이메일 -> users 조회 -> members에 UID 추가 (owner는 추가 안 함)
   const inviteMemberByEmail = async (projectUid: string) => {
     if (!userUid) return;
 
@@ -311,13 +275,11 @@ export default function CreateProjectPage() {
       const userDocSnap = usnap.docs[0];
       const invitedUid = (userDocSnap.id ?? "").trim();
 
-      // ✅ 방어: 빈 uid 금지
       if (!invitedUid) {
         alert("초대 대상 사용자 UID가 비정상입니다.");
         return;
       }
 
-      // ✅ 본인은 참여자로 추가하지 않음(기존 정책 유지)
       if (invitedUid === userUid) {
         alert("본인은 참여자로 추가하지 않습니다.");
         return;
@@ -328,7 +290,6 @@ export default function CreateProjectPage() {
         updatedAt: serverTimestamp(),
       });
 
-      // ✅ 캐시에 즉시 반영(표시 지연 방지)
       const data = userDocSnap.data() as any;
       const invitedEmail = normalizeEmail(data?.email ?? email);
       const invitedName = safeTrim(data?.name) || fallbackNameFromEmail(invitedEmail);
@@ -346,7 +307,6 @@ export default function CreateProjectPage() {
     }
   };
 
-  // ✅ 참여자 삭제: members에서만 제거(arrayRemove)
   const removeMember = async (projectUid: string, memberUid: string, label: string) => {
     const ok = window.confirm(`참여자를 삭제하시겠습니까?\n\n대상: ${label}`);
     if (!ok) return;
@@ -366,9 +326,6 @@ export default function CreateProjectPage() {
     }
   };
 
-  /**
-   * ✅ 오너 변경(트랜잭션)
-   */
   const transferOwner = async (projectUid: string) => {
     if (!userUid) return;
 
@@ -391,18 +348,15 @@ export default function CreateProjectPage() {
 
         const project = projectSnap.data() as ProjectDoc;
 
-        // ✅ 현재 오너만 변경 가능
         if (project.ownerUid !== userUid) {
           throw new Error("오너만 오너 변경을 수행할 수 있습니다.");
         }
 
-        // ✅ 새 오너는 members에 있어야 함(빈 값/공백 제거 후 검사)
         const members = sanitizeUids(project.members);
         if (!members.includes(newOwnerUid)) {
           throw new Error("선택한 사용자가 참여자 목록에 없습니다.");
         }
 
-        // ✅ 새 오너 이메일 조회(users/{uid})
         const userRef = doc(db, "users", newOwnerUid);
         const userSnap = await tx.get(userRef);
         if (!userSnap.exists()) throw new Error("새 오너 사용자 정보를 찾을 수 없습니다.");
@@ -411,7 +365,6 @@ export default function CreateProjectPage() {
         const newOwnerEmail = normalizeEmail(udata?.email ?? "");
         if (!newOwnerEmail) throw new Error("새 오너 이메일 정보가 없습니다.");
 
-        // ✅ 오너 변경 + 새 오너를 members에서 제거(기존 정책 유지)
         tx.update(projectRef, {
           ownerUid: newOwnerUid,
           ownerEmail: newOwnerEmail,
@@ -444,7 +397,6 @@ export default function CreateProjectPage() {
         <h1 className="text-xl font-bold">Project 생성/관리</h1>
       </div>
 
-      {/* 생성 */}
       <section className="border rounded-md p-4 mb-6">
         <div className="flex items-center gap-2 flex-wrap">
           <div className="font-semibold whitespace-nowrap">새 Project</div>
@@ -465,7 +417,6 @@ export default function CreateProjectPage() {
         </div>
       </section>
 
-      {/* 목록 */}
       <section className="border rounded-md p-4">
         <div className="font-semibold mb-3">내 Project 목록</div>
 
@@ -480,19 +431,16 @@ export default function CreateProjectPage() {
               const inviteEmail = inviteEmailByProject[p.uid] ?? "";
               const inviteLoading = inviteLoadingByProject[p.uid] ?? false;
 
-              // ✅ owner 표시용 프로필(없으면 ownerEmail 기반 fallback)
               const ownerProfile = memberProfileByUid[p.ownerUid];
               const ownerEmail = normalizeEmail(ownerProfile?.email ?? p.ownerEmail);
               const ownerName = safeTrim(ownerProfile?.name) || fallbackNameFromEmail(ownerEmail);
               const ownerLabel = formatMember(ownerEmail, ownerName);
 
-              // ✅ members 정리(핵심)
               const memberUids = sanitizeUids(p.members);
 
-              // ✅ members 표시용 라벨(fallback 강화: 프로필 없어도 uid는 반드시 보이게)
               const memberLabels = memberUids.map((uid) => {
                 const mp = memberProfileByUid[uid];
-                if (!mp) return { uid, label: uid }; // ✅ 절대 빈 문자열로 떨어지지 않음
+                if (!mp) return { uid, label: uid };
                 return { uid, label: formatMember(mp.email, mp.name) };
               });
 
@@ -501,7 +449,6 @@ export default function CreateProjectPage() {
 
               return (
                 <div key={p.uid} className="border rounded-md p-3">
-                  {/* 한 줄: ID:Name + 참여자추가 + 버튼들 */}
                   <div className="flex items-center gap-2 flex-wrap">
                     <div className="flex items-center gap-2 flex-1 min-w-[260px]">
                       <div className="text-sm font-semibold whitespace-nowrap">{p.uid}</div>
@@ -519,7 +466,6 @@ export default function CreateProjectPage() {
                       )}
                     </div>
 
-                    {/* 참여자 추가(오른쪽) */}
                     <div className="flex items-center gap-2">
                       <input
                         className="border rounded px-3 py-2 text-sm w-[260px] max-w-[60vw]"
@@ -539,7 +485,6 @@ export default function CreateProjectPage() {
                       </button>
                     </div>
 
-                    {/* 수정/삭제 */}
                     <div className="flex items-center gap-2">
                       {!isEditing ? (
                         <>
@@ -581,24 +526,22 @@ export default function CreateProjectPage() {
                     </div>
                   </div>
 
-                  {/* 참여자 표시(줄바꿈 최소화) */}
                   <div className="mt-2 text-xs opacity-80 flex flex-wrap items-center gap-2">
                     <span className="font-semibold whitespace-nowrap">참여자:</span>
 
-                    {/* owner는 항상 표시 */}
                     <span className="inline-flex items-center gap-2 border rounded px-2 py-1">
                       <span className="whitespace-nowrap">{ownerLabel}</span>
                       <span className="text-[10px] opacity-70 whitespace-nowrap">Owner</span>
                     </span>
 
-                    {/* ✅ 오너 변경 UI: 참여자가 있어야 선택 가능 */}
                     {memberUids.length > 0 && (
                       <span className="inline-flex items-center gap-2 border rounded px-2 py-1">
                         <span className="whitespace-nowrap">오너 변경</span>
 
                         <select
-                          // ✅ 전역 수정 없이, 이 select만 기존 UI 톤에 맞춤
-                          className="border rounded px-2 py-1 text-xs bg-transparent text-black/80 dark:text-white/80 border-black/20 dark:border-white/20"
+                          // ✅ 핵심: 드롭다운(option) 가독성은 네이티브 렌더링 영향
+                          // ✅ 이 select "하나만" color-scheme를 light로 지정 (전역 영향 없음)
+                          className="border rounded px-2 py-1 text-xs bg-transparent text-black/80 dark:text-white/80 border-black/20 dark:border-white/20 [color-scheme:light]"
                           value={selectedNewOwnerUid}
                           onChange={(e) =>
                             setNewOwnerUidByProject((prev) => ({ ...prev, [p.uid]: e.target.value }))
@@ -623,7 +566,6 @@ export default function CreateProjectPage() {
                       </span>
                     )}
 
-                    {/* members: 삭제 가능 */}
                     {memberLabels.length === 0 ? (
                       <span className="opacity-70 whitespace-nowrap">없음</span>
                     ) : (
