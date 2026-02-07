@@ -9,9 +9,8 @@
 // - 새 오너는 "참여자" 중에서 선택
 // - 변경 후 ownerUid/ownerEmail 갱신
 // - 기존 정책 유지: owner는 members 배열에 저장하지 않음
-// ✅ 다크/라이트에서 select 글씨 가독성 개선
-// - globals.css 건드리지 않음
-// - 오너 변경 select 1개만 기존 입력 UI와 동일한 톤(className 패턴) 적용
+// ✅ 다크/라이트에서 select 가독성: 이 select만 기존 톤 패턴 적용(전역 영향 없음)
+// ✅ members 배열에 빈 uid("") 등이 섞여도 UI가 깨지지 않도록 필터링(핵심)
 
 import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
@@ -71,6 +70,21 @@ function fallbackNameFromEmail(email: string) {
 function formatMember(email: string, name: string) {
   // ✅ 요구사항: 이메일(사용자이름)
   return `${email}(${name})`;
+}
+
+/**
+ * ✅ members 배열 정리 유틸
+ * - 빈 문자열/공백/비문자열 제거
+ * - 중복 제거
+ */
+function sanitizeUids(arr: any): string[] {
+  const src = Array.isArray(arr) ? arr : [];
+  const cleaned = src
+    .map((v) => (typeof v === "string" ? v.trim() : ""))
+    .filter((v) => v.length > 0);
+
+  // ✅ 중복 제거
+  return Array.from(new Set(cleaned));
 }
 
 export default function CreateProjectPage() {
@@ -152,7 +166,9 @@ export default function CreateProjectPage() {
 
     projects.forEach((p) => {
       if (p.ownerUid) uids.add(p.ownerUid);
-      (p.members ?? []).forEach((uid) => uid && uids.add(uid));
+
+      // ✅ members 정리 후 uid 수집
+      sanitizeUids(p.members).forEach((uid) => uids.add(uid));
     });
 
     const needFetch = Array.from(uids).filter((uid) => !memberProfileByUid[uid]);
@@ -293,9 +309,15 @@ export default function CreateProjectPage() {
       }
 
       const userDocSnap = usnap.docs[0];
-      const invitedUid = userDocSnap.id;
+      const invitedUid = (userDocSnap.id ?? "").trim();
 
-      // ✅ owner(본인) 저장은 금지(기존 정책 유지)
+      // ✅ 방어: 빈 uid 금지
+      if (!invitedUid) {
+        alert("초대 대상 사용자 UID가 비정상입니다.");
+        return;
+      }
+
+      // ✅ 본인은 참여자로 추가하지 않음(기존 정책 유지)
       if (invitedUid === userUid) {
         alert("본인은 참여자로 추가하지 않습니다.");
         return;
@@ -346,8 +368,6 @@ export default function CreateProjectPage() {
 
   /**
    * ✅ 오너 변경(트랜잭션)
-   * - 새 오너는 members에 있는 UID만 선택 가능
-   * - 변경 후: ownerUid/ownerEmail 갱신 + 새 오너를 members에서 제거(기존 정책 유지)
    */
   const transferOwner = async (projectUid: string) => {
     if (!userUid) return;
@@ -371,13 +391,13 @@ export default function CreateProjectPage() {
 
         const project = projectSnap.data() as ProjectDoc;
 
-        // ✅ 안전장치: 현재 오너만 변경 가능 (규칙에서도 막아야 하지만, UI에서도 1차 체크)
+        // ✅ 현재 오너만 변경 가능
         if (project.ownerUid !== userUid) {
           throw new Error("오너만 오너 변경을 수행할 수 있습니다.");
         }
 
-        // ✅ 새 오너는 members에 있어야 함
-        const members = Array.isArray(project.members) ? project.members : [];
+        // ✅ 새 오너는 members에 있어야 함(빈 값/공백 제거 후 검사)
+        const members = sanitizeUids(project.members);
         if (!members.includes(newOwnerUid)) {
           throw new Error("선택한 사용자가 참여자 목록에 없습니다.");
         }
@@ -391,7 +411,7 @@ export default function CreateProjectPage() {
         const newOwnerEmail = normalizeEmail(udata?.email ?? "");
         if (!newOwnerEmail) throw new Error("새 오너 이메일 정보가 없습니다.");
 
-        // ✅ 오너 변경 + 새 오너를 members에서 제거(오너는 members에 저장하지 않는 기존 정책 유지)
+        // ✅ 오너 변경 + 새 오너를 members에서 제거(기존 정책 유지)
         tx.update(projectRef, {
           ownerUid: newOwnerUid,
           ownerEmail: newOwnerEmail,
@@ -400,7 +420,6 @@ export default function CreateProjectPage() {
         });
       });
 
-      // UI 상태 정리
       setNewOwnerUidByProject((prev) => ({ ...prev, [projectUid]: "" }));
       alert("오너 변경이 완료되었습니다.");
     } catch (e: any) {
@@ -467,11 +486,13 @@ export default function CreateProjectPage() {
               const ownerName = safeTrim(ownerProfile?.name) || fallbackNameFromEmail(ownerEmail);
               const ownerLabel = formatMember(ownerEmail, ownerName);
 
-              // ✅ members 표시용 목록
-              const memberUids = p.members ?? [];
+              // ✅ members 정리(핵심)
+              const memberUids = sanitizeUids(p.members);
+
+              // ✅ members 표시용 라벨(fallback 강화: 프로필 없어도 uid는 반드시 보이게)
               const memberLabels = memberUids.map((uid) => {
                 const mp = memberProfileByUid[uid];
-                if (!mp) return { uid, label: uid };
+                if (!mp) return { uid, label: uid }; // ✅ 절대 빈 문자열로 떨어지지 않음
                 return { uid, label: formatMember(mp.email, mp.name) };
               });
 
@@ -576,8 +597,7 @@ export default function CreateProjectPage() {
                         <span className="whitespace-nowrap">오너 변경</span>
 
                         <select
-                          // ✅ 전역(globals) 수정 없이, 이 select만 기존 UI 톤에 맞춤
-                          // - 배경 투명 + 테마별 텍스트/테두리 톤
+                          // ✅ 전역 수정 없이, 이 select만 기존 UI 톤에 맞춤
                           className="border rounded px-2 py-1 text-xs bg-transparent text-black/80 dark:text-white/80 border-black/20 dark:border-white/20"
                           value={selectedNewOwnerUid}
                           onChange={(e) =>
