@@ -2,12 +2,9 @@
 
 // app/contents/create_project/page.tsx
 // ✅ Project 생성/수정/삭제 + 참여자 초대(이메일) + 참여자 삭제 관리
-// ✅ UI 요구 반영:
-// 1) 버튼 글씨 가로(whitespace-nowrap)
-// 2) 줄바꿈 최소화: "PRJ_000001 : KIND" 한 줄 + 우측에 참여자 추가/버튼
-// 3) 참여자 표기: email(name)
-// ✅ 생성자(owner)는 참여자 표시에 포함되나, members에는 저장하지 않음(표시만 포함)
-// ✅ 참여자 삭제는 members에서만 제거(arrayRemove), owner 삭제 불가(confirm)
+// ✅ 추가 기능: 오너 변경(Owner Transfer)
+// - 오너 변경 시: 새 오너가 생성 메뉴에서 기존 오너와 동일한 권한을 갖도록(ownerUid 기준)
+// - 기존 정책 유지: owner는 members 배열에 저장하지 않음 (표시만 포함)
 
 import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
@@ -93,6 +90,10 @@ export default function CreateProjectPage() {
   // 참여자 프로필 캐시(uid -> profile)
   const [memberProfileByUid, setMemberProfileByUid] = useState<Record<string, MemberProfile>>({});
 
+  // ✅ 오너 변경 UI 상태(프로젝트별)
+  const [newOwnerUidByProject, setNewOwnerUidByProject] = useState<Record<string, string>>({});
+  const [ownerTransferLoadingKey, setOwnerTransferLoadingKey] = useState<string>("");
+
   // 로그인 상태
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -110,7 +111,7 @@ export default function CreateProjectPage() {
     return () => unsub();
   }, []);
 
-  // 프로젝트 목록(생성자 기준: 관리자만 사용하는 페이지이므로 ownerUid==나 기준 유지)
+  // 프로젝트 목록(오너 기준)
   useEffect(() => {
     if (!userUid) return;
 
@@ -286,9 +287,9 @@ export default function CreateProjectPage() {
       const userDocSnap = usnap.docs[0];
       const invitedUid = userDocSnap.id;
 
-      // ✅ owner(본인) 저장은 금지(요구 유지)
+      // ✅ owner(본인) 저장은 금지(기존 정책 유지)
       if (invitedUid === userUid) {
-        alert("생성 관리자(본인)는 참여자로 추가하지 않습니다.");
+        alert("본인은 참여자로 추가하지 않습니다.");
         return;
       }
 
@@ -315,7 +316,7 @@ export default function CreateProjectPage() {
     }
   };
 
-  // ✅ 참여자 삭제: members에서만 제거(arrayRemove), owner는 삭제 불가
+  // ✅ 참여자 삭제: members에서만 제거(arrayRemove)
   const removeMember = async (projectUid: string, memberUid: string, label: string) => {
     const ok = window.confirm(`참여자를 삭제하시겠습니까?\n\n대상: ${label}`);
     if (!ok) return;
@@ -332,6 +333,72 @@ export default function CreateProjectPage() {
       alert(e?.message ?? "참여자 삭제 중 오류가 발생했습니다.");
     } finally {
       setRemoveLoadingKey("");
+    }
+  };
+
+  /**
+   * ✅ 오너 변경(트랜잭션)
+   * - 새 오너는 members에 있는 UID만 선택 가능(이 화면 UI 기준)
+   * - 변경 후: ownerUid/ownerEmail 갱신 + 새 오너를 members에서 제거(기존 정책 유지)
+   */
+  const transferOwner = async (projectUid: string) => {
+    if (!userUid) return;
+
+    const newOwnerUid = (newOwnerUidByProject[projectUid] ?? "").trim();
+    if (!newOwnerUid) {
+      alert("오너로 변경할 참여자를 선택해주세요.");
+      return;
+    }
+
+    const ok = window.confirm("오너를 변경하시겠습니까?\n변경 후 현재 계정에서는 목록에서 사라질 수 있습니다.");
+    if (!ok) return;
+
+    setOwnerTransferLoadingKey(projectUid);
+
+    try {
+      await runTransaction(db, async (tx) => {
+        const projectRef = doc(db, "projects", projectUid);
+        const projectSnap = await tx.get(projectRef);
+        if (!projectSnap.exists()) throw new Error("프로젝트를 찾을 수 없습니다.");
+
+        const project = projectSnap.data() as ProjectDoc;
+
+        // ✅ 안전장치: 현재 오너만 변경 가능 (규칙에서도 막아야 하지만, UI에서도 1차 체크)
+        if (project.ownerUid !== userUid) {
+          throw new Error("오너만 오너 변경을 수행할 수 있습니다.");
+        }
+
+        // ✅ 새 오너는 members에 있어야 함(이 페이지 정책)
+        const members = Array.isArray(project.members) ? project.members : [];
+        if (!members.includes(newOwnerUid)) {
+          throw new Error("선택한 사용자가 참여자 목록에 없습니다.");
+        }
+
+        // ✅ 새 오너 이메일 조회(users/{uid})
+        const userRef = doc(db, "users", newOwnerUid);
+        const userSnap = await tx.get(userRef);
+        if (!userSnap.exists()) throw new Error("새 오너 사용자 정보를 찾을 수 없습니다.");
+
+        const udata = userSnap.data() as any;
+        const newOwnerEmail = normalizeEmail(udata?.email ?? "");
+        if (!newOwnerEmail) throw new Error("새 오너 이메일 정보가 없습니다.");
+
+        // ✅ 오너 변경 + 새 오너를 members에서 제거(오너는 members에 저장하지 않는 기존 정책 유지)
+        tx.update(projectRef, {
+          ownerUid: newOwnerUid,
+          ownerEmail: newOwnerEmail,
+          members: arrayRemove(newOwnerUid),
+          updatedAt: serverTimestamp(),
+        });
+      });
+
+      // UI 상태 정리
+      setNewOwnerUidByProject((prev) => ({ ...prev, [projectUid]: "" }));
+      alert("오너 변경이 완료되었습니다.");
+    } catch (e: any) {
+      alert(e?.message ?? "오너 변경 중 오류가 발생했습니다.");
+    } finally {
+      setOwnerTransferLoadingKey("");
     }
   };
 
@@ -400,6 +467,9 @@ export default function CreateProjectPage() {
                 if (!mp) return { uid, label: uid };
                 return { uid, label: formatMember(mp.email, mp.name) };
               });
+
+              const selectedNewOwnerUid = newOwnerUidByProject[p.uid] ?? "";
+              const ownerTransferLoading = ownerTransferLoadingKey === p.uid;
 
               return (
                 <div key={p.uid} className="border rounded-md p-3">
@@ -487,11 +557,40 @@ export default function CreateProjectPage() {
                   <div className="mt-2 text-xs opacity-80 flex flex-wrap items-center gap-2">
                     <span className="font-semibold whitespace-nowrap">참여자:</span>
 
-                    {/* owner는 항상 표시(삭제 버튼 없음) */}
+                    {/* owner는 항상 표시 */}
                     <span className="inline-flex items-center gap-2 border rounded px-2 py-1">
                       <span className="whitespace-nowrap">{ownerLabel}</span>
                       <span className="text-[10px] opacity-70 whitespace-nowrap">Owner</span>
                     </span>
+
+                    {/* ✅ 오너 변경 UI: members가 있을 때만 노출 */}
+                    {memberUids.length > 0 && (
+                      <span className="inline-flex items-center gap-2 border rounded px-2 py-1">
+                        <span className="whitespace-nowrap">오너 변경</span>
+                        <select
+                          className="border rounded px-2 py-1 text-xs"
+                          value={selectedNewOwnerUid}
+                          onChange={(e) =>
+                            setNewOwnerUidByProject((prev) => ({ ...prev, [p.uid]: e.target.value }))
+                          }
+                        >
+                          <option value="">선택</option>
+                          {memberLabels.map(({ uid, label }) => (
+                            <option key={uid} value={uid}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="border rounded px-2 py-0.5 text-[11px] whitespace-nowrap"
+                          onClick={() => transferOwner(p.uid)}
+                          disabled={ownerTransferLoading}
+                          title="오너 변경"
+                        >
+                          {ownerTransferLoading ? "..." : "변경"}
+                        </button>
+                      </span>
+                    )}
 
                     {/* members: 삭제 가능 */}
                     {memberLabels.length === 0 ? (
