@@ -1,10 +1,17 @@
 "use client";
 
 // app/contents/create_project/page.tsx
-// ✅ Project 생성/수정/삭제 + 참여자 초대(이메일) + 참여자 삭제 관리
-// ✅ 추가 기능: 오너 변경(Owner Transfer)
-// - 오너 변경 시: 새 오너가 생성 메뉴에서 기존 오너와 동일한 권한을 갖도록(ownerUid 기준)
-// - 기존 정책 유지: owner는 members 배열에 저장하지 않음 (표시만 포함)
+// ✅ Project 생성/관리 화면
+// - Project 생성 (PRJ_000001 자동 증가)
+// - Project명 수정/삭제
+// - 참여자 추가(이메일 기반) / 참여자 삭제
+// ✅ 오너 변경(Owner Transfer)
+// - 새 오너는 "참여자" 중에서 선택
+// - 변경 후 ownerUid/ownerEmail 갱신
+// - 기존 정책 유지: owner는 members 배열에 저장하지 않음
+// ✅ 다크/라이트에서 select 글씨 가독성 개선
+// - globals.css 건드리지 않음
+// - 오너 변경 select 1개만 기존 입력 UI와 동일한 톤(className 패턴) 적용
 
 import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
@@ -123,6 +130,7 @@ export default function CreateProjectPage() {
       (snap) => {
         const rows = snap.docs.map((d) => d.data() as ProjectDoc);
 
+        // ✅ 최신 생성 순 정렬
         rows.sort((a, b) => {
           const at = a.createdAt?.toMillis?.() ?? 0;
           const bt = b.createdAt?.toMillis?.() ?? 0;
@@ -298,7 +306,7 @@ export default function CreateProjectPage() {
         updatedAt: serverTimestamp(),
       });
 
-      // 캐시에 즉시 반영(표시 지연 방지)
+      // ✅ 캐시에 즉시 반영(표시 지연 방지)
       const data = userDocSnap.data() as any;
       const invitedEmail = normalizeEmail(data?.email ?? email);
       const invitedName = safeTrim(data?.name) || fallbackNameFromEmail(invitedEmail);
@@ -338,7 +346,7 @@ export default function CreateProjectPage() {
 
   /**
    * ✅ 오너 변경(트랜잭션)
-   * - 새 오너는 members에 있는 UID만 선택 가능(이 화면 UI 기준)
+   * - 새 오너는 members에 있는 UID만 선택 가능
    * - 변경 후: ownerUid/ownerEmail 갱신 + 새 오너를 members에서 제거(기존 정책 유지)
    */
   const transferOwner = async (projectUid: string) => {
@@ -368,7 +376,7 @@ export default function CreateProjectPage() {
           throw new Error("오너만 오너 변경을 수행할 수 있습니다.");
         }
 
-        // ✅ 새 오너는 members에 있어야 함(이 페이지 정책)
+        // ✅ 새 오너는 members에 있어야 함
         const members = Array.isArray(project.members) ? project.members : [];
         if (!members.includes(newOwnerUid)) {
           throw new Error("선택한 사용자가 참여자 목록에 없습니다.");
@@ -461,7 +469,6 @@ export default function CreateProjectPage() {
 
               // ✅ members 표시용 목록
               const memberUids = p.members ?? [];
-
               const memberLabels = memberUids.map((uid) => {
                 const mp = memberProfileByUid[uid];
                 if (!mp) return { uid, label: uid };
@@ -553,7 +560,7 @@ export default function CreateProjectPage() {
                     </div>
                   </div>
 
-                  {/* 참여자 관리 표시(줄바꿈 최소화: 한 줄 + 삭제 버튼은 아이템별) */}
+                  {/* 참여자 표시(줄바꿈 최소화) */}
                   <div className="mt-2 text-xs opacity-80 flex flex-wrap items-center gap-2">
                     <span className="font-semibold whitespace-nowrap">참여자:</span>
 
@@ -563,12 +570,15 @@ export default function CreateProjectPage() {
                       <span className="text-[10px] opacity-70 whitespace-nowrap">Owner</span>
                     </span>
 
-                    {/* ✅ 오너 변경 UI: members가 있을 때만 노출 */}
+                    {/* ✅ 오너 변경 UI: 참여자가 있어야 선택 가능 */}
                     {memberUids.length > 0 && (
                       <span className="inline-flex items-center gap-2 border rounded px-2 py-1">
                         <span className="whitespace-nowrap">오너 변경</span>
+
                         <select
-                          className="border rounded px-2 py-1 text-xs"
+                          // ✅ 전역(globals) 수정 없이, 이 select만 기존 UI 톤에 맞춤
+                          // - 배경 투명 + 테마별 텍스트/테두리 톤
+                          className="border rounded px-2 py-1 text-xs bg-transparent text-black/80 dark:text-white/80 border-black/20 dark:border-white/20"
                           value={selectedNewOwnerUid}
                           onChange={(e) =>
                             setNewOwnerUidByProject((prev) => ({ ...prev, [p.uid]: e.target.value }))
@@ -581,6 +591,7 @@ export default function CreateProjectPage() {
                             </option>
                           ))}
                         </select>
+
                         <button
                           className="border rounded px-2 py-0.5 text-[11px] whitespace-nowrap"
                           onClick={() => transferOwner(p.uid)}
@@ -625,5 +636,3 @@ export default function CreateProjectPage() {
     </main>
   );
 }
-
-
