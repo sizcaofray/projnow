@@ -10,10 +10,6 @@
 // - 목록 조회: owner + member 기준으로 모두 조회
 // - 편집 권한: owner인 프로젝트만 수정/삭제/참여자관리/오너변경 가능
 // - member는 조회만 가능
-// ✅ 진단 로그 추가
-// - 현재 로그인 uid
-// - owner/member query 성공/실패 여부
-// - 합쳐진 프로젝트 목록 확인
 
 import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
@@ -91,7 +87,6 @@ function sortProjects(rows: ProjectDoc[]) {
 }
 
 export default function CreateProjectPage() {
-  console.log("🔥 CreateProjectPage loaded");
   const [userUid, setUserUid] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
@@ -118,7 +113,6 @@ export default function CreateProjectPage() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       if (!u) {
-        console.log("[Project] auth state: logged out");
         setUserUid(null);
         setUserEmail(null);
         setProjects([]);
@@ -129,10 +123,6 @@ export default function CreateProjectPage() {
       const nextUid = u.uid;
       const nextEmail = normalizeEmail(u.email ?? "");
 
-      console.log("[Project] auth state: logged in");
-      console.log("[Project] current userUid =", nextUid);
-      console.log("[Project] current userEmail =", nextEmail);
-
       setUserUid(nextUid);
       setUserEmail(nextEmail);
     });
@@ -142,8 +132,6 @@ export default function CreateProjectPage() {
 
   useEffect(() => {
     if (!userUid) return;
-
-    console.log("[Project] subscribe start, userUid =", userUid);
 
     setLoading(true);
 
@@ -165,15 +153,10 @@ export default function CreateProjectPage() {
 
       const merged = sortProjects(Array.from(mergedMap.values()));
 
-      console.log("[Project] ownerRows =", ownerRows);
-      console.log("[Project] memberRows =", memberRows);
-      console.log("[Project] merged =", merged);
-
       setProjects(merged);
 
       if (ownerLoaded && memberLoaded) {
         setLoading(false);
-        console.log("[Project] loading complete");
       }
     };
 
@@ -182,11 +165,6 @@ export default function CreateProjectPage() {
       (snap) => {
         ownerRows = snap.docs.map((d) => d.data() as ProjectDoc);
         ownerLoaded = true;
-        console.log("[Project] owner query success, count =", snap.docs.length);
-        console.log(
-          "[Project] owner query doc ids =",
-          snap.docs.map((d) => d.id)
-        );
         applyMerged();
       },
       (error) => {
@@ -201,11 +179,6 @@ export default function CreateProjectPage() {
       (snap) => {
         memberRows = snap.docs.map((d) => d.data() as ProjectDoc);
         memberLoaded = true;
-        console.log("[Project] member query success, count =", snap.docs.length);
-        console.log(
-          "[Project] member query doc ids =",
-          snap.docs.map((d) => d.id)
-        );
         applyMerged();
       },
       (error) => {
@@ -216,7 +189,6 @@ export default function CreateProjectPage() {
     );
 
     return () => {
-      console.log("[Project] unsubscribe project listeners");
       unsubOwner();
       unsubMember();
     };
@@ -243,7 +215,6 @@ export default function CreateProjectPage() {
           try {
             const snap = await getDoc(doc(db, "users", uid));
             if (!snap.exists()) {
-              console.warn("[Project] users doc not found for uid =", uid);
               return;
             }
 
@@ -354,6 +325,7 @@ export default function CreateProjectPage() {
     try {
       const projectRef = doc(db, "projects", uid);
       const snap = await getDoc(projectRef);
+
       if (!snap.exists()) {
         alert("프로젝트를 찾을 수 없습니다.");
         return;
@@ -434,10 +406,6 @@ export default function CreateProjectPage() {
       const data = userDocSnap.data() as any;
       const invitedEmail = normalizeEmail(data?.email ?? email);
       const invitedName = safeTrim(data?.name) || fallbackNameFromEmail(invitedEmail);
-
-      console.log("[Project] invite success, projectUid =", projectUid);
-      console.log("[Project] invitedUid =", invitedUid);
-      console.log("[Project] invitedEmail =", invitedEmail);
 
       setMemberProfileByUid((prev) => ({
         ...prev,
