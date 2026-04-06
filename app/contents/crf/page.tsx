@@ -9,11 +9,8 @@
  * 3) 선택된 projectId 기준으로 CRF 로드/저장
  * 4) owner만 수정 가능, member는 조회만 가능
  *
- * 기존 유지:
- * - Excel 업로드
- * - 행 추가/삭제
- * - 행 드래그 정렬
- * - + 버튼 툴팁
+ * 추가 수정:
+ * - 프로젝트 select 박스는 다크모드 영향 없이 항상 밝은 배경/검정 글씨 고정
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -255,17 +252,7 @@ export default function CRFPage() {
       setError("");
       setInfo("");
 
-      if (!db) {
-        setRows([]);
-        return;
-      }
-
-      if (!uid) {
-        setRows([]);
-        return;
-      }
-
-      if (!selectedProjectId) {
+      if (!db || !uid || !selectedProjectId) {
         setRows([]);
         return;
       }
@@ -286,6 +273,7 @@ export default function CRFPage() {
 
         setRows(loaded.length > 0 ? loaded : [makeEmptyRow()]);
       } catch (e: any) {
+        setRows([]);
         setError(e?.message ?? "CRF 데이터 로드 실패");
       } finally {
         setLoading(false);
@@ -544,6 +532,27 @@ export default function CRFPage() {
       z-index: 50;
       pointer-events: none;
     }
+
+    .project-select{
+      width: 360px;
+      max-width: 72vw;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.16);
+      background: #2f2f34;
+      color: #ffffff;
+      outline: none;
+      appearance: auto;
+      -webkit-appearance: menulist;
+      -moz-appearance: menulist;
+      color-scheme: dark;
+      -webkit-text-fill-color: #ffffff;
+    }
+
+    .project-select option{
+      background: #ffffff;
+      color: #111111;
+    }
   `;
 
   const cardStyle: React.CSSProperties = {
@@ -624,12 +633,7 @@ export default function CRFPage() {
               <select
                 value={selectedProjectId}
                 onChange={(e) => setSelectedProjectId(e.target.value)}
-                style={{
-                  ...inputStyle,
-                  width: 360,
-                  maxWidth: "72vw",
-                  colorScheme: "light",
-                }}
+                className="project-select"
                 disabled={loadingProjects || projects.length === 0}
               >
                 {projects.length === 0 ? (
