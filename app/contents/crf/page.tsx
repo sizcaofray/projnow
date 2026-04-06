@@ -7,6 +7,10 @@
  * 1) 행 사이에 있던 "Form 추가" 버튼 전부 제거
  * 2) 각 form 행의 - 버튼 오른쪽에 + 버튼 추가 (해당 행 아래에 삽입)
  * 3) + 버튼 마우스 오버 시 하단에 "Form 추가" 툴팁 표시
+ *
+ * 추가 안정화:
+ * - Firestore 로드 시 repeat 값을 toBoolRepeat()로 해석
+ * - Excel 헤더 인식 안정성 보강
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -32,8 +36,20 @@ function toStr(v: any) {
 function toBoolRepeat(v: any) {
   if (typeof v === "boolean") return v;
   if (typeof v === "number") return v !== 0;
-  const s = String(v ?? "").trim().toLowerCase();
-  return s === "y" || s === "yes" || s === "true" || s === "1" || s === "o" || s === "ok" || s === "checked";
+
+  const s = String(v ?? "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    s === "y" ||
+    s === "yes" ||
+    s === "true" ||
+    s === "1" ||
+    s === "o" ||
+    s === "ok" ||
+    s === "checked"
+  );
 }
 
 function newRowId() {
@@ -82,14 +98,11 @@ export default function CRFPage() {
   const [error, setError] = useState<string>("");
   const [info, setInfo] = useState<string>("");
 
-  // Drag & Drop 상태
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
 
-  // ✅ 툴팁 표시 상태(+ 버튼 hover)
   const [hoverPlusId, setHoverPlusId] = useState<string | null>(null);
 
-  // ✅ 로그인 사용자 식별
   useEffect(() => {
     if (!auth) {
       setError("Firebase Auth 초기화 실패");
@@ -105,36 +118,49 @@ export default function CRFPage() {
     return () => unsub();
   }, [auth]);
 
-  // ✅ 사용자별 데이터 로드
   useEffect(() => {
     const run = async () => {
       setError("");
       setInfo("");
 
-      if (!db) return;
+      if (!db) {
+        setRows([]);
+        return;
+      }
+
       if (!uid) {
         setRows([]);
         return;
       }
 
       setLoading(true);
+
       try {
         const ref = doc(db, COL, uid);
         const snap = await getDoc(ref);
 
         if (!snap.exists()) {
-          setRows([{ id: newRowId(), formName: "", formCode: "", repeat: false, createdAt: Date.now() }]);
+          setRows([
+            {
+              id: newRowId(),
+              formName: "",
+              formCode: "",
+              repeat: false,
+              createdAt: Date.now(),
+            },
+          ]);
           return;
         }
 
         const data = snap.data() as any;
+
         const loaded: FormRow[] = Array.isArray(data?.rows)
           ? data.rows
               .map((r: any) => ({
                 id: toStr(r?.id) || newRowId(),
                 formName: toStr(r?.formName),
                 formCode: toStr(r?.formCode),
-                repeat: Boolean(r?.repeat),
+                repeat: toBoolRepeat(r?.repeat),
                 createdAt: Number(r?.createdAt ?? Date.now()),
               }))
               .filter((r: FormRow) => !!r.id)
@@ -143,7 +169,15 @@ export default function CRFPage() {
         setRows(
           loaded.length > 0
             ? loaded
-            : [{ id: newRowId(), formName: "", formCode: "", repeat: false, createdAt: Date.now() }]
+            : [
+                {
+                  id: newRowId(),
+                  formName: "",
+                  formCode: "",
+                  repeat: false,
+                  createdAt: Date.now(),
+                },
+              ]
         );
       } catch (e: any) {
         setError(e?.message ?? "데이터 로드 실패");
@@ -155,15 +189,22 @@ export default function CRFPage() {
     run();
   }, [db, uid]);
 
-  // ✅ 저장
   const saveNow = async (nextRows?: FormRow[]) => {
     setError("");
     setInfo("");
 
-    if (!db) return setError("Firestore 초기화 실패");
-    if (!uid) return setError("로그인이 필요합니다.");
+    if (!db) {
+      setError("Firestore 초기화 실패");
+      return;
+    }
+
+    if (!uid) {
+      setError("로그인이 필요합니다.");
+      return;
+    }
 
     setSaving(true);
+
     try {
       const ref = doc(db, COL, uid);
 
@@ -187,16 +228,20 @@ export default function CRFPage() {
     }
   };
 
-  // ✅ 마지막에 Form 추가(상단 버튼용)
   const addRow = () => {
     setRows((prev) => [
       ...prev,
-      { id: newRowId(), formName: "", formCode: "", repeat: false, createdAt: Date.now() },
+      {
+        id: newRowId(),
+        formName: "",
+        formCode: "",
+        repeat: false,
+        createdAt: Date.now(),
+      },
     ]);
     setInfo("");
   };
 
-  // ✅ 특정 행 아래에 삽입(+ 버튼용)
   const insertRowAfter = (afterId: string) => {
     setRows((prev) => {
       const idx = prev.findIndex((r) => r.id === afterId);
@@ -212,28 +257,37 @@ export default function CRFPage() {
       });
       return next;
     });
+
     setInfo("");
   };
 
-  // ✅ 행 삭제
   const removeRow = (rowId: string) => {
     setRows((prev) => {
       const next = prev.filter((r) => r.id !== rowId);
+
       if (next.length === 0) {
-        return [{ id: newRowId(), formName: "", formCode: "", repeat: false, createdAt: Date.now() }];
+        return [
+          {
+            id: newRowId(),
+            formName: "",
+            formCode: "",
+            repeat: false,
+            createdAt: Date.now(),
+          },
+        ];
       }
+
       return next;
     });
+
     setInfo("");
   };
 
-  // ✅ 셀 수정
   const updateRow = (rowId: string, patch: Partial<FormRow>) => {
     setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, ...patch } : r)));
     setInfo("");
   };
 
-  // ✅ Excel 업로드(덮어쓰기)
   const applyExcelFile = async (file: File) => {
     setError("");
     setInfo("");
@@ -258,7 +312,12 @@ export default function CRFPage() {
       const ws = wb.Sheets[sheetName];
       const json = XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: "" });
 
-      const normalizeKey = (k: string) => k.replace(/\s+/g, "").toLowerCase();
+      const normalizeKey = (k: string) =>
+        String(k ?? "")
+          .replace(/\s+/g, "")
+          .replace(/[_-]/g, "")
+          .toLowerCase();
+
       const keys = Object.keys(json?.[0] ?? {});
 
       const keyMap: Record<"formName" | "formCode" | "repeat", string | null> = {
@@ -269,9 +328,27 @@ export default function CRFPage() {
 
       for (const k of keys) {
         const nk = normalizeKey(k);
-        if (!keyMap.formName && (nk === "formname" || nk === "form_name" || nk === "name")) keyMap.formName = k;
-        if (!keyMap.formCode && (nk === "formcode" || nk === "form_code" || nk === "code")) keyMap.formCode = k;
-        if (!keyMap.repeat && nk === "repeat") keyMap.repeat = k;
+
+        if (
+          !keyMap.formName &&
+          (nk === "formname" || nk === "name" || nk === "폼명" || nk === "폼이름")
+        ) {
+          keyMap.formName = k;
+        }
+
+        if (
+          !keyMap.formCode &&
+          (nk === "formcode" || nk === "code" || nk === "폼코드")
+        ) {
+          keyMap.formCode = k;
+        }
+
+        if (
+          !keyMap.repeat &&
+          (nk === "repeat" || nk === "반복" || nk === "반복여부")
+        ) {
+          keyMap.repeat = k;
+        }
       }
 
       if (!keyMap.formName || !keyMap.formCode || !keyMap.repeat) {
@@ -279,11 +356,14 @@ export default function CRFPage() {
         return;
       }
 
+      const now = Date.now();
+
       const nextRows: FormRow[] = json
-        .map((r) => {
+        .map((r, idx) => {
           const formName = toStr(r[keyMap.formName as string]);
           const formCode = toStr(r[keyMap.formCode as string]);
           const repeat = toBoolRepeat(r[keyMap.repeat as string]);
+
           if (!formName && !formCode) return null;
 
           return {
@@ -291,7 +371,7 @@ export default function CRFPage() {
             formName,
             formCode,
             repeat,
-            createdAt: Date.now(),
+            createdAt: now + idx,
           } as FormRow;
         })
         .filter(Boolean) as FormRow[];
@@ -310,7 +390,6 @@ export default function CRFPage() {
     }
   };
 
-  // ✅ Drag & Drop 핸들러
   const onDragStartRow = (rowId: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
     setDraggingId(rowId);
     setOverId(rowId);
@@ -327,6 +406,7 @@ export default function CRFPage() {
 
   const onDropRow = (rowId: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
     e.preventDefault();
+
     const activeId = e.dataTransfer.getData("text/plain") || draggingId;
     if (!activeId) return;
 
@@ -341,7 +421,6 @@ export default function CRFPage() {
     setOverId(null);
   };
 
-  // ✅ 스타일
   const themeCss = `
     .crf-wrap{
       --text: #0b0f19;
@@ -376,7 +455,6 @@ export default function CRFPage() {
       }
     }
 
-    /* ✅ 툴팁(하단 표시) */
     .plus-wrap{ position: relative; display: inline-flex; }
     .plus-tip{
       position: absolute;
@@ -416,10 +494,22 @@ export default function CRFPage() {
     fontWeight: 800,
   };
 
-  const subtleText: React.CSSProperties = { fontSize: 12, opacity: 0.85, color: "var(--muted)" };
+  const subtleText: React.CSSProperties = {
+    fontSize: 12,
+    opacity: 0.85,
+    color: "var(--muted)",
+  };
 
   const SectionHeader = ({ title, right }: { title: string; right?: React.ReactNode }) => (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 10,
+        marginBottom: 10,
+      }}
+    >
       <div style={{ fontWeight: 900, color: "var(--text)" }}>{title}</div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>{right}</div>
     </div>
@@ -451,7 +541,9 @@ export default function CRFPage() {
       <style>{themeCss}</style>
 
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 900, margin: 0, color: "var(--text)" }}>CRF Form Builder</h1>
+        <h1 style={{ fontSize: 22, fontWeight: 900, margin: 0, color: "var(--text)" }}>
+          CRF Form Builder
+        </h1>
         <span style={subtleText}>/contents/crf</span>
       </div>
 
@@ -476,11 +568,15 @@ export default function CRFPage() {
                 파일 업로드 시 기존 내용은 사라집니다.
               </span>
 
-              <button type="button" style={btnStyle} onClick={() => inputExcelRef.current?.click()} disabled={loading}>
+              <button
+                type="button"
+                style={btnStyle}
+                onClick={() => inputExcelRef.current?.click()}
+                disabled={loading}
+              >
                 Excel 업로드(채우기)
               </button>
 
-              {/* 상단 Form 추가는 유지(원하시면 이것도 제거 가능) */}
               <button type="button" style={btnStyle} onClick={addRow} disabled={loading}>
                 Form 추가
               </button>
@@ -613,7 +709,6 @@ export default function CRFPage() {
                       />
                     </td>
 
-                    {/* ✅ - 버튼 오른쪽에 + 버튼 배치 + hover 툴팁 */}
                     <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
                       <div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
                         <button
