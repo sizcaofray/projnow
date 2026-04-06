@@ -3,20 +3,32 @@
 /**
  * CRF Form Builder
  *
- * 변경 사항(요청 반영):
- * 1) 행 사이에 있던 "Form 추가" 버튼 전부 제거
- * 2) 각 form 행의 - 버튼 오른쪽에 + 버튼 추가 (해당 행 아래에 삽입)
- * 3) + 버튼 마우스 오버 시 하단에 "Form 추가" 툴팁 표시
+ * 프로젝트 연동 반영:
+ * 1) 상단에 프로젝트 선택 드롭다운 추가
+ * 2) owner + member 기준 프로젝트 목록 조회
+ * 3) 선택된 projectId 기준으로 CRF 로드/저장
+ * 4) owner만 수정 가능, member는 조회만 가능
  *
- * 추가 안정화:
- * - Firestore 로드 시 repeat 값을 toBoolRepeat()로 해석
- * - Excel 헤더 인식 안정성 보강
+ * 기존 유지:
+ * - Excel 업로드
+ * - 행 추가/삭제
+ * - 행 드래그 정렬
+ * - + 버튼 툴팁
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { onAuthStateChanged } from "firebase/auth";
-import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  getDoc,
+  onSnapshot,
+  query,
+  serverTimestamp,
+  setDoc,
+  where,
+} from "firebase/firestore";
 import { getFirebaseAuth, getFirebaseDb } from "@/lib/firebase/client";
 
 type FormRow = {
@@ -25,6 +37,16 @@ type FormRow = {
   formCode: string;
   repeat: boolean;
   createdAt: number;
+};
+
+type ProjectDoc = {
+  uid: string;
+  name: string;
+  ownerUid: string;
+  ownerEmail?: string;
+  members?: string[];
+  createdAt?: any;
+  updatedAt?: any;
 };
 
 const COL = "crf_forms";
@@ -36,20 +58,8 @@ function toStr(v: any) {
 function toBoolRepeat(v: any) {
   if (typeof v === "boolean") return v;
   if (typeof v === "number") return v !== 0;
-
-  const s = String(v ?? "")
-    .trim()
-    .toLowerCase();
-
-  return (
-    s === "y" ||
-    s === "yes" ||
-    s === "true" ||
-    s === "1" ||
-    s === "o" ||
-    s === "ok" ||
-    s === "checked"
-  );
+  const s = String(v ?? "").trim().toLowerCase();
+  return s === "y" || s === "yes" || s === "true" || s === "1" || s === "o" || s === "ok" || s === "checked";
 }
 
 function newRowId() {
@@ -67,6 +77,38 @@ function reorderById<T extends { id: string }>(arr: T[], activeId: string, overI
   const [moved] = next.splice(from, 1);
   next.splice(to, 0, moved);
   return next;
+}
+
+function sanitizeProjectRows(rows: any[]): FormRow[] {
+  return Array.isArray(rows)
+    ? rows
+        .map((r: any) => ({
+          id: toStr(r?.id) || newRowId(),
+          formName: toStr(r?.formName),
+          formCode: toStr(r?.formCode),
+          repeat: toBoolRepeat(r?.repeat),
+          createdAt: Number(r?.createdAt ?? Date.now()),
+        }))
+        .filter((r: FormRow) => !!r.id)
+    : [];
+}
+
+function makeEmptyRow(): FormRow {
+  return {
+    id: newRowId(),
+    formName: "",
+    formCode: "",
+    repeat: false,
+    createdAt: Date.now(),
+  };
+}
+
+function sortProjects(rows: ProjectDoc[]) {
+  return [...rows].sort((a, b) => {
+    const at = a.createdAt?.toMillis?.() ?? 0;
+    const bt = b.createdAt?.toMillis?.() ?? 0;
+    return bt - at;
+  });
 }
 
 export default function CRFPage() {
@@ -91,6 +133,11 @@ export default function CRFPage() {
   const [uid, setUid] = useState<string>("");
   const [loadingUser, setLoadingUser] = useState(true);
 
+  const [projects, setProjects] = useState<ProjectDoc[]>([]);
+  const [loadingProjects, setLoadingProjects] = useState(false);
+  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
+  const [selectedProject, setSelectedProject] = useState<ProjectDoc | null>(null);
+
   const [rows, setRows] = useState<FormRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -100,7 +147,6 @@ export default function CRFPage() {
 
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
-
   const [hoverPlusId, setHoverPlusId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -119,6 +165,92 @@ export default function CRFPage() {
   }, [auth]);
 
   useEffect(() => {
+    if (!db || !uid) {
+      setProjects([]);
+      setSelectedProjectId("");
+      setSelectedProject(null);
+      return;
+    }
+
+    setLoadingProjects(true);
+
+    const ownerQuery = query(collection(db, "projects"), where("ownerUid", "==", uid));
+    const memberQuery = query(collection(db, "projects"), where("members", "array-contains", uid));
+
+    let ownerRows: ProjectDoc[] = [];
+    let memberRows: ProjectDoc[] = [];
+    let ownerLoaded = false;
+    let memberLoaded = false;
+
+    const applyMerged = () => {
+      const mergedMap = new Map<string, ProjectDoc>();
+
+      [...ownerRows, ...memberRows].forEach((row) => {
+        if (!row?.uid) return;
+        mergedMap.set(row.uid, row);
+      });
+
+      const merged = sortProjects(Array.from(mergedMap.values()));
+      setProjects(merged);
+
+      setSelectedProject((prev) => {
+        if (!selectedProjectId) return null;
+        return merged.find((p) => p.uid === selectedProjectId) ?? null;
+      });
+
+      setSelectedProjectId((prev) => {
+        if (prev && merged.some((p) => p.uid === prev)) return prev;
+        return merged[0]?.uid ?? "";
+      });
+
+      if (ownerLoaded && memberLoaded) {
+        setLoadingProjects(false);
+      }
+    };
+
+    const unsubOwner = onSnapshot(
+      ownerQuery,
+      (snap) => {
+        ownerRows = snap.docs.map((d) => d.data() as ProjectDoc);
+        ownerLoaded = true;
+        applyMerged();
+      },
+      (e: any) => {
+        ownerLoaded = true;
+        setError(e?.message ?? "프로젝트(owner) 조회 실패");
+        applyMerged();
+      }
+    );
+
+    const unsubMember = onSnapshot(
+      memberQuery,
+      (snap) => {
+        memberRows = snap.docs.map((d) => d.data() as ProjectDoc);
+        memberLoaded = true;
+        applyMerged();
+      },
+      (e: any) => {
+        memberLoaded = true;
+        setError(e?.message ?? "프로젝트(member) 조회 실패");
+        applyMerged();
+      }
+    );
+
+    return () => {
+      unsubOwner();
+      unsubMember();
+    };
+  }, [db, uid, selectedProjectId]);
+
+  useEffect(() => {
+    const found = projects.find((p) => p.uid === selectedProjectId) ?? null;
+    setSelectedProject(found);
+  }, [projects, selectedProjectId]);
+
+  const isOwner = !!uid && !!selectedProject && selectedProject.ownerUid === uid;
+  const canEdit = !!selectedProjectId && isOwner;
+
+  useEffect(() => {
     const run = async () => {
       setError("");
       setInfo("");
@@ -133,82 +265,55 @@ export default function CRFPage() {
         return;
       }
 
+      if (!selectedProjectId) {
+        setRows([]);
+        return;
+      }
+
       setLoading(true);
 
       try {
-        const ref = doc(db, COL, uid);
+        const ref = doc(db, COL, selectedProjectId);
         const snap = await getDoc(ref);
 
         if (!snap.exists()) {
-          setRows([
-            {
-              id: newRowId(),
-              formName: "",
-              formCode: "",
-              repeat: false,
-              createdAt: Date.now(),
-            },
-          ]);
+          setRows([makeEmptyRow()]);
           return;
         }
 
         const data = snap.data() as any;
+        const loaded = sanitizeProjectRows(data?.rows);
 
-        const loaded: FormRow[] = Array.isArray(data?.rows)
-          ? data.rows
-              .map((r: any) => ({
-                id: toStr(r?.id) || newRowId(),
-                formName: toStr(r?.formName),
-                formCode: toStr(r?.formCode),
-                repeat: toBoolRepeat(r?.repeat),
-                createdAt: Number(r?.createdAt ?? Date.now()),
-              }))
-              .filter((r: FormRow) => !!r.id)
-          : [];
-
-        setRows(
-          loaded.length > 0
-            ? loaded
-            : [
-                {
-                  id: newRowId(),
-                  formName: "",
-                  formCode: "",
-                  repeat: false,
-                  createdAt: Date.now(),
-                },
-              ]
-        );
+        setRows(loaded.length > 0 ? loaded : [makeEmptyRow()]);
       } catch (e: any) {
-        setError(e?.message ?? "데이터 로드 실패");
+        setError(e?.message ?? "CRF 데이터 로드 실패");
       } finally {
         setLoading(false);
       }
     };
 
     run();
-  }, [db, uid]);
+  }, [db, uid, selectedProjectId]);
 
   const saveNow = async (nextRows?: FormRow[]) => {
     setError("");
     setInfo("");
 
-    if (!db) {
-      setError("Firestore 초기화 실패");
-      return;
-    }
-
-    if (!uid) {
-      setError("로그인이 필요합니다.");
-      return;
-    }
+    if (!db) return setError("Firestore 초기화 실패");
+    if (!uid) return setError("로그인이 필요합니다.");
+    if (!selectedProjectId) return setError("프로젝트를 선택해주세요.");
+    if (!selectedProject) return setError("선택된 프로젝트 정보를 찾을 수 없습니다.");
+    if (!isOwner) return setError("오너만 저장할 수 있습니다.");
 
     setSaving(true);
 
     try {
-      const ref = doc(db, COL, uid);
+      const ref = doc(db, COL, selectedProjectId);
 
       const payload = {
+        projectId: selectedProjectId,
+        projectName: selectedProject.name ?? "",
+        ownerUid: selectedProject.ownerUid ?? "",
         rows: (nextRows ?? rows).map((r) => ({
           id: r.id,
           formName: r.formName ?? "",
@@ -216,6 +321,7 @@ export default function CRFPage() {
           repeat: !!r.repeat,
           createdAt: Number(r.createdAt ?? Date.now()),
         })),
+        updatedBy: uid,
         updatedAt: serverTimestamp(),
       };
 
@@ -229,32 +335,20 @@ export default function CRFPage() {
   };
 
   const addRow = () => {
-    setRows((prev) => [
-      ...prev,
-      {
-        id: newRowId(),
-        formName: "",
-        formCode: "",
-        repeat: false,
-        createdAt: Date.now(),
-      },
-    ]);
+    if (!canEdit) return;
+    setRows((prev) => [...prev, makeEmptyRow()]);
     setInfo("");
   };
 
   const insertRowAfter = (afterId: string) => {
+    if (!canEdit) return;
+
     setRows((prev) => {
       const idx = prev.findIndex((r) => r.id === afterId);
       if (idx < 0) return prev;
 
       const next = [...prev];
-      next.splice(idx + 1, 0, {
-        id: newRowId(),
-        formName: "",
-        formCode: "",
-        repeat: false,
-        createdAt: Date.now(),
-      });
+      next.splice(idx + 1, 0, makeEmptyRow());
       return next;
     });
 
@@ -262,28 +356,18 @@ export default function CRFPage() {
   };
 
   const removeRow = (rowId: string) => {
+    if (!canEdit) return;
+
     setRows((prev) => {
       const next = prev.filter((r) => r.id !== rowId);
-
-      if (next.length === 0) {
-        return [
-          {
-            id: newRowId(),
-            formName: "",
-            formCode: "",
-            repeat: false,
-            createdAt: Date.now(),
-          },
-        ];
-      }
-
-      return next;
+      return next.length === 0 ? [makeEmptyRow()] : next;
     });
 
     setInfo("");
   };
 
   const updateRow = (rowId: string, patch: Partial<FormRow>) => {
+    if (!canEdit) return;
     setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, ...patch } : r)));
     setInfo("");
   };
@@ -291,6 +375,16 @@ export default function CRFPage() {
   const applyExcelFile = async (file: File) => {
     setError("");
     setInfo("");
+
+    if (!selectedProjectId) {
+      setError("프로젝트를 먼저 선택해주세요.");
+      return;
+    }
+
+    if (!isOwner) {
+      setError("오너만 Excel 업로드가 가능합니다.");
+      return;
+    }
 
     if (!/\.(xlsx|xls)$/i.test(file.name)) {
       setError("엑셀 파일(.xlsx/.xls)만 업로드할 수 있습니다.");
@@ -312,12 +406,7 @@ export default function CRFPage() {
       const ws = wb.Sheets[sheetName];
       const json = XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: "" });
 
-      const normalizeKey = (k: string) =>
-        String(k ?? "")
-          .replace(/\s+/g, "")
-          .replace(/[_-]/g, "")
-          .toLowerCase();
-
+      const normalizeKey = (k: string) => k.replace(/\s+/g, "").toLowerCase();
       const keys = Object.keys(json?.[0] ?? {});
 
       const keyMap: Record<"formName" | "formCode" | "repeat", string | null> = {
@@ -328,27 +417,9 @@ export default function CRFPage() {
 
       for (const k of keys) {
         const nk = normalizeKey(k);
-
-        if (
-          !keyMap.formName &&
-          (nk === "formname" || nk === "name" || nk === "폼명" || nk === "폼이름")
-        ) {
-          keyMap.formName = k;
-        }
-
-        if (
-          !keyMap.formCode &&
-          (nk === "formcode" || nk === "code" || nk === "폼코드")
-        ) {
-          keyMap.formCode = k;
-        }
-
-        if (
-          !keyMap.repeat &&
-          (nk === "repeat" || nk === "반복" || nk === "반복여부")
-        ) {
-          keyMap.repeat = k;
-        }
+        if (!keyMap.formName && (nk === "formname" || nk === "form_name" || nk === "name")) keyMap.formName = k;
+        if (!keyMap.formCode && (nk === "formcode" || nk === "form_code" || nk === "code")) keyMap.formCode = k;
+        if (!keyMap.repeat && nk === "repeat") keyMap.repeat = k;
       }
 
       if (!keyMap.formName || !keyMap.formCode || !keyMap.repeat) {
@@ -356,14 +427,11 @@ export default function CRFPage() {
         return;
       }
 
-      const now = Date.now();
-
       const nextRows: FormRow[] = json
-        .map((r, idx) => {
+        .map((r) => {
           const formName = toStr(r[keyMap.formName as string]);
           const formCode = toStr(r[keyMap.formCode as string]);
           const repeat = toBoolRepeat(r[keyMap.repeat as string]);
-
           if (!formName && !formCode) return null;
 
           return {
@@ -371,7 +439,7 @@ export default function CRFPage() {
             formName,
             formCode,
             repeat,
-            createdAt: now + idx,
+            createdAt: Date.now(),
           } as FormRow;
         })
         .filter(Boolean) as FormRow[];
@@ -391,6 +459,7 @@ export default function CRFPage() {
   };
 
   const onDragStartRow = (rowId: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
+    if (!canEdit) return;
     setDraggingId(rowId);
     setOverId(rowId);
     setInfo("");
@@ -399,12 +468,14 @@ export default function CRFPage() {
   };
 
   const onDragOverRow = (rowId: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
+    if (!canEdit) return;
     e.preventDefault();
     setOverId(rowId);
     e.dataTransfer.dropEffect = "move";
   };
 
   const onDropRow = (rowId: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
+    if (!canEdit) return;
     e.preventDefault();
 
     const activeId = e.dataTransfer.getData("text/plain") || draggingId;
@@ -494,21 +565,21 @@ export default function CRFPage() {
     fontWeight: 800,
   };
 
-  const subtleText: React.CSSProperties = {
-    fontSize: 12,
-    opacity: 0.85,
-    color: "var(--muted)",
+  const subtleText: React.CSSProperties = { fontSize: 12, opacity: 0.85, color: "var(--muted)" };
+
+  const inputStyle: React.CSSProperties = {
+    width: "100%",
+    padding: "8px 10px",
+    borderRadius: 10,
+    border: "1px solid var(--input-border)",
+    background: "var(--input-bg)",
+    color: "var(--text)",
+    outline: "none",
   };
 
   const SectionHeader = ({ title, right }: { title: string; right?: React.ReactNode }) => (
     <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 10,
-        marginBottom: 10,
-      }}
+      style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}
     >
       <div style={{ fontWeight: 900, color: "var(--text)" }}>{title}</div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>{right}</div>
@@ -541,10 +612,59 @@ export default function CRFPage() {
       <style>{themeCss}</style>
 
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 900, margin: 0, color: "var(--text)" }}>
-          CRF Form Builder
-        </h1>
+        <h1 style={{ fontSize: 22, fontWeight: 900, margin: 0, color: "var(--text)" }}>CRF Form Builder</h1>
         <span style={subtleText}>/contents/crf</span>
+      </div>
+
+      <div style={{ ...cardStyle, marginBottom: 14 }}>
+        <SectionHeader
+          title="프로젝트 선택"
+          right={
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <select
+                value={selectedProjectId}
+                onChange={(e) => setSelectedProjectId(e.target.value)}
+                style={{
+                  ...inputStyle,
+                  width: 360,
+                  maxWidth: "72vw",
+                  colorScheme: "light",
+                }}
+                disabled={loadingProjects || projects.length === 0}
+              >
+                {projects.length === 0 ? (
+                  <option value="">참여 중인 프로젝트 없음</option>
+                ) : (
+                  projects.map((p) => (
+                    <option key={p.uid} value={p.uid}>
+                      {p.uid} : {p.name}
+                    </option>
+                  ))
+                )}
+              </select>
+
+              {selectedProject ? (
+                <span
+                  style={{
+                    ...subtleText,
+                    fontWeight: 900,
+                    color: isOwner ? "var(--ok)" : "var(--warn)",
+                  }}
+                >
+                  {isOwner ? "Owner 권한" : "Member 권한(조회만 가능)"}
+                </span>
+              ) : null}
+            </div>
+          }
+        />
+
+        <div style={{ ...subtleText, marginTop: 6 }}>
+          {loadingProjects
+            ? "프로젝트 목록을 불러오는 중입니다."
+            : projects.length === 0
+            ? "참여 중인 프로젝트가 없습니다."
+            : "프로젝트를 선택하면 해당 프로젝트의 CRF를 조회합니다."}
+        </div>
       </div>
 
       <div style={{ ...cardStyle, marginBottom: 14 }}>
@@ -570,14 +690,21 @@ export default function CRFPage() {
 
               <button
                 type="button"
-                style={btnStyle}
+                style={{ ...btnStyle, opacity: canEdit ? 1 : 0.6, cursor: canEdit ? "pointer" : "not-allowed" }}
                 onClick={() => inputExcelRef.current?.click()}
-                disabled={loading}
+                disabled={loading || !canEdit}
+                title={!canEdit ? "오너만 업로드 가능합니다." : "Excel 업로드"}
               >
                 Excel 업로드(채우기)
               </button>
 
-              <button type="button" style={btnStyle} onClick={addRow} disabled={loading}>
+              <button
+                type="button"
+                style={{ ...btnStyle, opacity: canEdit ? 1 : 0.6, cursor: canEdit ? "pointer" : "not-allowed" }}
+                onClick={addRow}
+                disabled={loading || !canEdit}
+                title={!canEdit ? "오너만 추가 가능합니다." : "Form 추가"}
+              >
                 Form 추가
               </button>
 
@@ -585,11 +712,12 @@ export default function CRFPage() {
                 type="button"
                 style={{
                   ...btnStyle,
-                  opacity: saving ? 0.7 : 1,
-                  cursor: saving ? "not-allowed" : "pointer",
+                  opacity: saving || !canEdit ? 0.6 : 1,
+                  cursor: saving || !canEdit ? "not-allowed" : "pointer",
                 }}
                 onClick={() => saveNow()}
-                disabled={saving || loading}
+                disabled={saving || loading || !canEdit}
+                title={!canEdit ? "오너만 저장 가능합니다." : "저장"}
               >
                 {saving ? "저장 중..." : "저장"}
               </button>
@@ -638,111 +766,124 @@ export default function CRFPage() {
             </thead>
 
             <tbody>
-              {rows.map((r, idx) => {
-                const isDragging = draggingId === r.id;
-                const isOver = overId === r.id && draggingId && draggingId !== r.id;
-
-                return (
-                  <tr
-                    key={r.id}
-                    draggable
-                    onDragStart={onDragStartRow(r.id)}
-                    onDragOver={onDragOverRow(r.id)}
-                    onDrop={onDropRow(r.id)}
-                    onDragEnd={onDragEndRow}
+              {rows.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={6}
                     style={{
-                      opacity: isDragging ? 0.6 : 1,
-                      outline: isOver ? "2px dashed var(--warn)" : "none",
-                      outlineOffset: -2,
-                      cursor: "grab",
+                      textAlign: "center",
+                      padding: 18,
+                      borderBottom: "1px solid var(--border-soft)",
+                      color: "var(--muted)",
                     }}
-                    title="드래그해서 순서를 변경할 수 있습니다."
                   >
-                    <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                      <span style={{ opacity: 0.75 }}>⋮⋮</span>
-                    </td>
+                    {selectedProjectId ? "데이터가 없습니다." : "프로젝트를 선택해주세요."}
+                  </td>
+                </tr>
+              ) : (
+                rows.map((r, idx) => {
+                  const isDragging = draggingId === r.id;
+                  const isOver = overId === r.id && draggingId && draggingId !== r.id;
 
-                    <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                      {idx + 1}
-                    </td>
+                  return (
+                    <tr
+                      key={r.id}
+                      draggable={canEdit}
+                      onDragStart={onDragStartRow(r.id)}
+                      onDragOver={onDragOverRow(r.id)}
+                      onDrop={onDropRow(r.id)}
+                      onDragEnd={onDragEndRow}
+                      style={{
+                        opacity: isDragging ? 0.6 : 1,
+                        outline: isOver ? "2px dashed var(--warn)" : "none",
+                        outlineOffset: -2,
+                        cursor: canEdit ? "grab" : "default",
+                      }}
+                      title={canEdit ? "드래그해서 순서를 변경할 수 있습니다." : "조회 전용입니다."}
+                    >
+                      <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                        <span style={{ opacity: canEdit ? 0.75 : 0.35 }}>⋮⋮</span>
+                      </td>
 
-                    <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                      <input
-                        value={r.formName}
-                        onChange={(e) => updateRow(r.id, { formName: e.target.value })}
-                        style={{
-                          width: "100%",
-                          padding: "8px 10px",
-                          borderRadius: 10,
-                          border: "1px solid var(--input-border)",
-                          background: "var(--input-bg)",
-                          color: "var(--text)",
-                          outline: "none",
-                        }}
-                        placeholder="e.g., Demographics"
-                      />
-                    </td>
+                      <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                        {idx + 1}
+                      </td>
 
-                    <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                      <input
-                        value={r.formCode}
-                        onChange={(e) => updateRow(r.id, { formCode: e.target.value })}
-                        style={{
-                          width: "100%",
-                          padding: "8px 10px",
-                          borderRadius: 10,
-                          border: "1px solid var(--input-border)",
-                          background: "var(--input-bg)",
-                          color: "var(--text)",
-                          outline: "none",
-                        }}
-                        placeholder="e.g., DM"
-                      />
-                    </td>
+                      <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                        <input
+                          value={r.formName}
+                          onChange={(e) => updateRow(r.id, { formName: e.target.value })}
+                          style={inputStyle}
+                          placeholder="e.g., Demographics"
+                          disabled={!canEdit}
+                        />
+                      </td>
 
-                    <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                      <input
-                        type="checkbox"
-                        checked={!!r.repeat}
-                        onChange={(e) => updateRow(r.id, { repeat: e.target.checked })}
-                        style={{ width: 18, height: 18 }}
-                      />
-                    </td>
+                      <td style={{ padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                        <input
+                          value={r.formCode}
+                          onChange={(e) => updateRow(r.id, { formCode: e.target.value })}
+                          style={inputStyle}
+                          placeholder="e.g., DM"
+                          disabled={!canEdit}
+                        />
+                      </td>
 
-                    <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
-                      <div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
-                        <button
-                          type="button"
-                          onClick={() => removeRow(r.id)}
-                          style={{ ...btnStyle, padding: "6px 10px" }}
-                          disabled={loading}
-                          title="삭제"
-                        >
-                          -
-                        </button>
+                      <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                        <input
+                          type="checkbox"
+                          checked={!!r.repeat}
+                          onChange={(e) => updateRow(r.id, { repeat: e.target.checked })}
+                          style={{ width: 18, height: 18 }}
+                          disabled={!canEdit}
+                        />
+                      </td>
 
-                        <span
-                          className="plus-wrap"
-                          onMouseEnter={() => setHoverPlusId(r.id)}
-                          onMouseLeave={() => setHoverPlusId(null)}
-                        >
+                      <td style={{ textAlign: "center", padding: 10, borderBottom: "1px solid var(--border-soft)" }}>
+                        <div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
                           <button
                             type="button"
-                            onClick={() => insertRowAfter(r.id)}
-                            style={{ ...btnStyle, padding: "6px 10px" }}
-                            disabled={loading}
-                            title="Form 추가"
+                            onClick={() => removeRow(r.id)}
+                            style={{
+                              ...btnStyle,
+                              padding: "6px 10px",
+                              opacity: canEdit ? 1 : 0.6,
+                              cursor: canEdit ? "pointer" : "not-allowed",
+                            }}
+                            disabled={loading || !canEdit}
+                            title={!canEdit ? "오너만 삭제 가능합니다." : "삭제"}
                           >
-                            +
+                            -
                           </button>
 
-                          {hoverPlusId === r.id ? <span className="plus-tip">Form 추가</span> : null}
-                        </span>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+                          <span
+                            className="plus-wrap"
+                            onMouseEnter={() => canEdit && setHoverPlusId(r.id)}
+                            onMouseLeave={() => setHoverPlusId(null)}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => insertRowAfter(r.id)}
+                              style={{
+                                ...btnStyle,
+                                padding: "6px 10px",
+                                opacity: canEdit ? 1 : 0.6,
+                                cursor: canEdit ? "pointer" : "not-allowed",
+                              }}
+                              disabled={loading || !canEdit}
+                              title={!canEdit ? "오너만 추가 가능합니다." : "Form 추가"}
+                            >
+                              +
+                            </button>
+
+                            {hoverPlusId === r.id ? <span className="plus-tip">Form 추가</span> : null}
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
             </tbody>
           </table>
         </div>
