@@ -10,6 +10,10 @@
 // - 목록 조회: owner + member 기준으로 모두 조회
 // - 편집 권한: owner인 프로젝트만 수정/삭제/참여자관리/오너변경 가능
 // - member는 조회만 가능
+// ✅ 진단 로그 추가
+// - 현재 로그인 uid
+// - owner/member query 성공/실패 여부
+// - 합쳐진 프로젝트 목록 확인
 
 import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
@@ -113,14 +117,23 @@ export default function CreateProjectPage() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       if (!u) {
+        console.log("[Project] auth state: logged out");
         setUserUid(null);
         setUserEmail(null);
         setProjects([]);
         setLoading(false);
         return;
       }
-      setUserUid(u.uid);
-      setUserEmail(normalizeEmail(u.email ?? ""));
+
+      const nextUid = u.uid;
+      const nextEmail = normalizeEmail(u.email ?? "");
+
+      console.log("[Project] auth state: logged in");
+      console.log("[Project] current userUid =", nextUid);
+      console.log("[Project] current userEmail =", nextEmail);
+
+      setUserUid(nextUid);
+      setUserEmail(nextEmail);
     });
 
     return () => unsub();
@@ -128,6 +141,8 @@ export default function CreateProjectPage() {
 
   useEffect(() => {
     if (!userUid) return;
+
+    console.log("[Project] subscribe start, userUid =", userUid);
 
     setLoading(true);
 
@@ -147,10 +162,17 @@ export default function CreateProjectPage() {
         mergedMap.set(row.uid, row);
       });
 
-      setProjects(sortProjects(Array.from(mergedMap.values())));
+      const merged = sortProjects(Array.from(mergedMap.values()));
+
+      console.log("[Project] ownerRows =", ownerRows);
+      console.log("[Project] memberRows =", memberRows);
+      console.log("[Project] merged =", merged);
+
+      setProjects(merged);
 
       if (ownerLoaded && memberLoaded) {
         setLoading(false);
+        console.log("[Project] loading complete");
       }
     };
 
@@ -159,10 +181,16 @@ export default function CreateProjectPage() {
       (snap) => {
         ownerRows = snap.docs.map((d) => d.data() as ProjectDoc);
         ownerLoaded = true;
+        console.log("[Project] owner query success, count =", snap.docs.length);
+        console.log(
+          "[Project] owner query doc ids =",
+          snap.docs.map((d) => d.id)
+        );
         applyMerged();
       },
-      () => {
+      (error) => {
         ownerLoaded = true;
+        console.error("[Project] owner query error =", error);
         applyMerged();
       }
     );
@@ -172,15 +200,22 @@ export default function CreateProjectPage() {
       (snap) => {
         memberRows = snap.docs.map((d) => d.data() as ProjectDoc);
         memberLoaded = true;
+        console.log("[Project] member query success, count =", snap.docs.length);
+        console.log(
+          "[Project] member query doc ids =",
+          snap.docs.map((d) => d.id)
+        );
         applyMerged();
       },
-      () => {
+      (error) => {
         memberLoaded = true;
+        console.error("[Project] member query error =", error);
         applyMerged();
       }
     );
 
     return () => {
+      console.log("[Project] unsubscribe project listeners");
       unsubOwner();
       unsubMember();
     };
@@ -206,15 +241,18 @@ export default function CreateProjectPage() {
         needFetch.map(async (uid) => {
           try {
             const snap = await getDoc(doc(db, "users", uid));
-            if (!snap.exists()) return;
+            if (!snap.exists()) {
+              console.warn("[Project] users doc not found for uid =", uid);
+              return;
+            }
 
             const data = snap.data() as any;
             const email = normalizeEmail(data?.email ?? "");
             const name = safeTrim(data?.name) || fallbackNameFromEmail(email);
 
             updates[uid] = { uid, email, name };
-          } catch {
-            // ignore
+          } catch (error) {
+            console.error("[Project] user profile fetch error, uid =", uid, error);
           }
         })
       );
@@ -269,6 +307,7 @@ export default function CreateProjectPage() {
 
       setNewName("");
     } catch (e: any) {
+      console.error("[Project] createProject error =", e);
       alert(e?.message ?? "프로젝트 생성 중 오류가 발생했습니다.");
     }
   };
@@ -302,6 +341,7 @@ export default function CreateProjectPage() {
       setEditingUid(null);
       setEditingName("");
     } catch (e: any) {
+      console.error("[Project] saveName error =", e);
       alert(e?.message ?? "프로젝트명 수정 중 오류가 발생했습니다.");
     }
   };
@@ -326,6 +366,7 @@ export default function CreateProjectPage() {
 
       await deleteDoc(projectRef);
     } catch (e: any) {
+      console.error("[Project] removeProject error =", e);
       alert(e?.message ?? "프로젝트 삭제 중 오류가 발생했습니다.");
     }
   };
@@ -393,6 +434,10 @@ export default function CreateProjectPage() {
       const invitedEmail = normalizeEmail(data?.email ?? email);
       const invitedName = safeTrim(data?.name) || fallbackNameFromEmail(invitedEmail);
 
+      console.log("[Project] invite success, projectUid =", projectUid);
+      console.log("[Project] invitedUid =", invitedUid);
+      console.log("[Project] invitedEmail =", invitedEmail);
+
       setMemberProfileByUid((prev) => ({
         ...prev,
         [invitedUid]: { uid: invitedUid, email: invitedEmail, name: invitedName },
@@ -400,6 +445,7 @@ export default function CreateProjectPage() {
 
       setInviteEmailByProject((prev) => ({ ...prev, [projectUid]: "" }));
     } catch (e: any) {
+      console.error("[Project] inviteMemberByEmail error =", e);
       alert(e?.message ?? "참여자 추가 중 오류가 발생했습니다.");
     } finally {
       setInviteLoadingByProject((prev) => ({ ...prev, [projectUid]: false }));
@@ -433,6 +479,7 @@ export default function CreateProjectPage() {
         updatedAt: serverTimestamp(),
       });
     } catch (e: any) {
+      console.error("[Project] removeMember error =", e);
       alert(e?.message ?? "참여자 삭제 중 오류가 발생했습니다.");
     } finally {
       setRemoveLoadingKey("");
@@ -489,6 +536,7 @@ export default function CreateProjectPage() {
       setNewOwnerUidByProject((prev) => ({ ...prev, [projectUid]: "" }));
       alert("오너 변경이 완료되었습니다.");
     } catch (e: any) {
+      console.error("[Project] transferOwner error =", e);
       alert(e?.message ?? "오너 변경 중 오류가 발생했습니다.");
     } finally {
       setOwnerTransferLoadingKey("");
