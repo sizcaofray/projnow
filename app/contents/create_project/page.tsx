@@ -91,6 +91,7 @@ function sortProjects(rows: ProjectDoc[]) {
 }
 
 export default function CreateProjectPage() {
+  console.log("🔥 CreateProjectPage loaded");
   const [userUid, setUserUid] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
