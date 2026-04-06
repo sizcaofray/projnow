@@ -5,13 +5,11 @@
 // - Project 생성 (PRJ_000001 자동 증가)
 // - Project명 수정/삭제
 // - 참여자 추가(이메일 기반) / 참여자 삭제
-// ✅ 오너 변경(Owner Transfer)
-// - 새 오너는 "참여자" 중에서 선택
-// - 변경 후 ownerUid/ownerEmail 갱신
-// - 기존 정책 유지: owner는 members 배열에 저장하지 않음
-// ✅ 다크모드에서 드롭다운(option) 흰배경/흰글씨 문제 해결
-// - globals.css 전역 수정 금지
-// - 오너 변경 select 1개만: 다크에서도 text-black으로(옵션 상속 포함) 처리
+// - 오너 변경(Owner Transfer)
+// ✅ 변경사항
+// - 목록 조회: owner + member 기준으로 모두 조회
+// - 편집 권한: owner인 프로젝트만 수정/삭제/참여자관리/오너변경 가능
+// - member는 조회만 가능
 
 import React, { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
@@ -72,13 +70,20 @@ function formatMember(email: string, name: string) {
   return `${email}(${name})`;
 }
 
-// ✅ members 정리(빈값/중복 제거)
 function sanitizeUids(arr: any): string[] {
   const src = Array.isArray(arr) ? arr : [];
   const cleaned = src
     .map((v) => (typeof v === "string" ? v.trim() : ""))
     .filter((v) => v.length > 0);
   return Array.from(new Set(cleaned));
+}
+
+function sortProjects(rows: ProjectDoc[]) {
+  return [...rows].sort((a, b) => {
+    const at = a.createdAt?.toMillis?.() ?? 0;
+    const bt = b.createdAt?.toMillis?.() ?? 0;
+    return bt - at;
+  });
 }
 
 export default function CreateProjectPage() {
@@ -94,7 +99,9 @@ export default function CreateProjectPage() {
   const [editingName, setEditingName] = useState<string>("");
 
   const [inviteEmailByProject, setInviteEmailByProject] = useState<Record<string, string>>({});
-  const [inviteLoadingByProject, setInviteLoadingByProject] = useState<Record<string, boolean>>({});
+  const [inviteLoadingByProject, setInviteLoadingByProject] = useState<Record<string, boolean>>(
+    {}
+  );
 
   const [removeLoadingKey, setRemoveLoadingKey] = useState<string>("");
 
@@ -123,26 +130,60 @@ export default function CreateProjectPage() {
     if (!userUid) return;
 
     setLoading(true);
-    const q = query(collection(db, "projects"), where("ownerUid", "==", userUid));
 
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const rows = snap.docs.map((d) => d.data() as ProjectDoc);
+    const ownerQuery = query(collection(db, "projects"), where("ownerUid", "==", userUid));
+    const memberQuery = query(collection(db, "projects"), where("members", "array-contains", userUid));
 
-        rows.sort((a, b) => {
-          const at = a.createdAt?.toMillis?.() ?? 0;
-          const bt = b.createdAt?.toMillis?.() ?? 0;
-          return bt - at;
-        });
+    let ownerRows: ProjectDoc[] = [];
+    let memberRows: ProjectDoc[] = [];
+    let ownerLoaded = false;
+    let memberLoaded = false;
 
-        setProjects(rows);
+    const applyMerged = () => {
+      const mergedMap = new Map<string, ProjectDoc>();
+
+      [...ownerRows, ...memberRows].forEach((row) => {
+        if (!row?.uid) return;
+        mergedMap.set(row.uid, row);
+      });
+
+      setProjects(sortProjects(Array.from(mergedMap.values())));
+
+      if (ownerLoaded && memberLoaded) {
         setLoading(false);
+      }
+    };
+
+    const unsubOwner = onSnapshot(
+      ownerQuery,
+      (snap) => {
+        ownerRows = snap.docs.map((d) => d.data() as ProjectDoc);
+        ownerLoaded = true;
+        applyMerged();
       },
-      () => setLoading(false)
+      () => {
+        ownerLoaded = true;
+        applyMerged();
+      }
     );
 
-    return () => unsub();
+    const unsubMember = onSnapshot(
+      memberQuery,
+      (snap) => {
+        memberRows = snap.docs.map((d) => d.data() as ProjectDoc);
+        memberLoaded = true;
+        applyMerged();
+      },
+      () => {
+        memberLoaded = true;
+        applyMerged();
+      }
+    );
+
+    return () => {
+      unsubOwner();
+      unsubMember();
+    };
   }, [userUid]);
 
   useEffect(() => {
@@ -210,7 +251,9 @@ export default function CreateProjectPage() {
         const projectRef = doc(db, "projects", uid);
 
         const existing = await tx.get(projectRef);
-        if (existing.exists()) throw new Error("이미 존재하는 프로젝트 UID입니다. 다시 시도해주세요.");
+        if (existing.exists()) {
+          throw new Error("이미 존재하는 프로젝트 UID입니다. 다시 시도해주세요.");
+        }
 
         tx.set(counterRef, { last: next }, { merge: true });
         tx.set(projectRef, {
@@ -238,7 +281,20 @@ export default function CreateProjectPage() {
     }
 
     try {
-      await updateDoc(doc(db, "projects", uid), {
+      const projectRef = doc(db, "projects", uid);
+      const snap = await getDoc(projectRef);
+      if (!snap.exists()) {
+        alert("프로젝트를 찾을 수 없습니다.");
+        return;
+      }
+
+      const project = snap.data() as ProjectDoc;
+      if (project.ownerUid !== userUid) {
+        alert("오너만 프로젝트명을 수정할 수 있습니다.");
+        return;
+      }
+
+      await updateDoc(projectRef, {
         name,
         updatedAt: serverTimestamp(),
       });
@@ -255,7 +311,20 @@ export default function CreateProjectPage() {
     if (!ok) return;
 
     try {
-      await deleteDoc(doc(db, "projects", uid));
+      const projectRef = doc(db, "projects", uid);
+      const snap = await getDoc(projectRef);
+      if (!snap.exists()) {
+        alert("프로젝트를 찾을 수 없습니다.");
+        return;
+      }
+
+      const project = snap.data() as ProjectDoc;
+      if (project.ownerUid !== userUid) {
+        alert("오너만 프로젝트를 삭제할 수 있습니다.");
+        return;
+      }
+
+      await deleteDoc(projectRef);
     } catch (e: any) {
       alert(e?.message ?? "프로젝트 삭제 중 오류가 발생했습니다.");
     }
@@ -275,6 +344,20 @@ export default function CreateProjectPage() {
     setInviteLoadingByProject((prev) => ({ ...prev, [projectUid]: true }));
 
     try {
+      const projectRef = doc(db, "projects", projectUid);
+      const projectSnap = await getDoc(projectRef);
+
+      if (!projectSnap.exists()) {
+        alert("프로젝트를 찾을 수 없습니다.");
+        return;
+      }
+
+      const project = projectSnap.data() as ProjectDoc;
+      if (project.ownerUid !== userUid) {
+        alert("오너만 참여자를 추가할 수 있습니다.");
+        return;
+      }
+
       const uq = query(collection(db, "users"), where("email", "==", email), limit(1));
       const usnap = await getDocs(uq);
 
@@ -296,7 +379,12 @@ export default function CreateProjectPage() {
         return;
       }
 
-      await updateDoc(doc(db, "projects", projectUid), {
+      if (invitedUid === project.ownerUid) {
+        alert("오너는 참여자로 추가할 수 없습니다.");
+        return;
+      }
+
+      await updateDoc(projectRef, {
         members: arrayUnion(invitedUid),
         updatedAt: serverTimestamp(),
       });
@@ -326,7 +414,21 @@ export default function CreateProjectPage() {
     setRemoveLoadingKey(key);
 
     try {
-      await updateDoc(doc(db, "projects", projectUid), {
+      const projectRef = doc(db, "projects", projectUid);
+      const snap = await getDoc(projectRef);
+
+      if (!snap.exists()) {
+        alert("프로젝트를 찾을 수 없습니다.");
+        return;
+      }
+
+      const project = snap.data() as ProjectDoc;
+      if (project.ownerUid !== userUid) {
+        alert("오너만 참여자를 삭제할 수 있습니다.");
+        return;
+      }
+
+      await updateDoc(projectRef, {
         members: arrayRemove(memberUid),
         updatedAt: serverTimestamp(),
       });
@@ -410,7 +512,7 @@ export default function CreateProjectPage() {
 
       <section className="border rounded-md p-4 mb-6">
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="font-semibold whitespace-nowrap">새 Project</div>
+          <div className="font-semibold whitespace-nowrap">New Project</div>
           <input
             className="border rounded px-3 py-2 flex-1 min-w-[220px]"
             placeholder="Project 명"
@@ -429,15 +531,16 @@ export default function CreateProjectPage() {
       </section>
 
       <section className="border rounded-md p-4">
-        <div className="font-semibold mb-3">내 Project 목록</div>
+        <div className="font-semibold mb-3">My Project List</div>
 
         {loading ? (
-          <p className="text-sm opacity-80">불러오는 중...</p>
+          <p className="text-sm opacity-80">Loading...</p>
         ) : projects.length === 0 ? (
-          <p className="text-sm opacity-80">생성된 프로젝트가 없습니다.</p>
+          <p className="text-sm opacity-80">참여 중인 프로젝트가 없습니다.</p>
         ) : (
           <div className="space-y-2">
             {projects.map((p) => {
+              const isOwner = p.ownerUid === userUid;
               const isEditing = editingUid === p.uid;
               const inviteEmail = inviteEmailByProject[p.uid] ?? "";
               const inviteLoading = inviteLoadingByProject[p.uid] ?? false;
@@ -476,64 +579,75 @@ export default function CreateProjectPage() {
                       )}
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <input
-                        className="border rounded px-3 py-2 text-sm w-[260px] max-w-[60vw]"
-                        placeholder="참여자 이메일"
-                        value={inviteEmail}
-                        onChange={(e) =>
-                          setInviteEmailByProject((prev) => ({ ...prev, [p.uid]: e.target.value }))
-                        }
-                      />
-                      <button
-                        className="border rounded px-3 py-2 text-sm whitespace-nowrap"
-                        onClick={() => inviteMemberByEmail(p.uid)}
-                        disabled={inviteLoading}
-                        title="참여자 추가"
-                      >
-                        {inviteLoading ? "처리중" : "추가"}
-                      </button>
-                    </div>
+                    {isOwner ? (
+                      <>
+                        <div className="flex items-center gap-2">
+                          <input
+                            className="border rounded px-3 py-2 text-sm w-[260px] max-w-[60vw]"
+                            placeholder="참여자 이메일"
+                            value={inviteEmail}
+                            onChange={(e) =>
+                              setInviteEmailByProject((prev) => ({
+                                ...prev,
+                                [p.uid]: e.target.value,
+                              }))
+                            }
+                          />
+                          <button
+                            className="border rounded px-3 py-2 text-sm whitespace-nowrap"
+                            onClick={() => inviteMemberByEmail(p.uid)}
+                            disabled={inviteLoading}
+                            title="참여자 추가"
+                          >
+                            {inviteLoading ? "처리중" : "추가"}
+                          </button>
+                        </div>
 
-                    <div className="flex items-center gap-2">
-                      {!isEditing ? (
-                        <>
-                          <button
-                            className="border rounded px-3 py-2 text-sm whitespace-nowrap"
-                            onClick={() => {
-                              setEditingUid(p.uid);
-                              setEditingName(p.name);
-                            }}
-                          >
-                            수정
-                          </button>
-                          <button
-                            className="border rounded px-3 py-2 text-sm whitespace-nowrap"
-                            onClick={() => removeProject(p.uid)}
-                          >
-                            삭제
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <button
-                            className="border rounded px-3 py-2 text-sm whitespace-nowrap"
-                            onClick={() => saveName(p.uid)}
-                          >
-                            저장
-                          </button>
-                          <button
-                            className="border rounded px-3 py-2 text-sm whitespace-nowrap"
-                            onClick={() => {
-                              setEditingUid(null);
-                              setEditingName("");
-                            }}
-                          >
-                            취소
-                          </button>
-                        </>
-                      )}
-                    </div>
+                        <div className="flex items-center gap-2">
+                          {!isEditing ? (
+                            <>
+                              <button
+                                className="border rounded px-3 py-2 text-sm whitespace-nowrap"
+                                onClick={() => {
+                                  setEditingUid(p.uid);
+                                  setEditingName(p.name);
+                                }}
+                              >
+                                수정
+                              </button>
+                              <button
+                                className="border rounded px-3 py-2 text-sm whitespace-nowrap"
+                                onClick={() => removeProject(p.uid)}
+                              >
+                                삭제
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                className="border rounded px-3 py-2 text-sm whitespace-nowrap"
+                                onClick={() => saveName(p.uid)}
+                              >
+                                저장
+                              </button>
+                              <button
+                                className="border rounded px-3 py-2 text-sm whitespace-nowrap"
+                                onClick={() => {
+                                  setEditingUid(null);
+                                  setEditingName("");
+                                }}
+                              >
+                                취소
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-xs opacity-70 border rounded px-3 py-2 whitespace-nowrap">
+                        참여자 권한
+                      </div>
+                    )}
                   </div>
 
                   <div className="mt-2 text-xs opacity-80 flex flex-wrap items-center gap-2">
@@ -544,19 +658,19 @@ export default function CreateProjectPage() {
                       <span className="text-[10px] opacity-70 whitespace-nowrap">Owner</span>
                     </span>
 
-                    {memberUids.length > 0 && (
+                    {isOwner && memberUids.length > 0 && (
                       <span className="inline-flex items-center gap-2 border rounded px-2 py-1">
                         <span className="whitespace-nowrap">오너 변경</span>
 
                         <select
-                          // ✅ 핵심: option이 select의 color를 상속하는 환경에서
-                          // - dark:text-white 같은 값이 들어가면 "흰배경+흰글씨"가 발생
-                          // ✅ 그래서 이 select 1개만: 다크에서도 text-black으로 통일(옵션 상속 포함)
                           style={{ colorScheme: "light" }}
                           className="border rounded px-2 py-1 text-xs bg-white/90 text-black border-black/20 dark:bg-white/90 dark:text-black dark:border-white/20"
                           value={selectedNewOwnerUid}
                           onChange={(e) =>
-                            setNewOwnerUidByProject((prev) => ({ ...prev, [p.uid]: e.target.value }))
+                            setNewOwnerUidByProject((prev) => ({
+                              ...prev,
+                              [p.uid]: e.target.value,
+                            }))
                           }
                         >
                           <option value="">선택</option>
@@ -588,14 +702,17 @@ export default function CreateProjectPage() {
                         return (
                           <span key={uid} className="inline-flex items-center gap-2 border rounded px-2 py-1">
                             <span className="whitespace-nowrap">{label}</span>
-                            <button
-                              className="border rounded px-2 py-0.5 text-[11px] whitespace-nowrap"
-                              onClick={() => removeMember(p.uid, uid, label)}
-                              disabled={removing}
-                              title="참여자 삭제"
-                            >
-                              {removing ? "..." : "삭제"}
-                            </button>
+
+                            {isOwner && (
+                              <button
+                                className="border rounded px-2 py-0.5 text-[11px] whitespace-nowrap"
+                                onClick={() => removeMember(p.uid, uid, label)}
+                                disabled={removing}
+                                title="참여자 삭제"
+                              >
+                                {removing ? "..." : "삭제"}
+                              </button>
+                            )}
                           </span>
                         );
                       })
