@@ -7,10 +7,11 @@
  * 1) 상단에 프로젝트 선택 드롭다운 추가
  * 2) owner + member 기준 프로젝트 목록 조회
  * 3) 선택된 projectId 기준으로 CRF 로드/저장
- * 4) owner만 수정 가능, member는 조회만 가능
+ * 4) owner + member 모두 수정 가능
  *
  * 추가 수정:
  * - 프로젝트 select 박스는 다크모드 영향 없이 항상 밝은 배경/검정 글씨 고정
+ * - snapshot 갱신 시 사용자가 선택한 프로젝트가 강제로 owner 프로젝트로 되돌아가는 문제 수정
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -190,11 +191,6 @@ export default function CRFPage() {
       const merged = sortProjects(Array.from(mergedMap.values()));
       setProjects(merged);
 
-      setSelectedProject((prev) => {
-        if (!selectedProjectId) return null;
-        return merged.find((p) => p.uid === selectedProjectId) ?? null;
-      });
-
       setSelectedProjectId((prev) => {
         if (prev && merged.some((p) => p.uid === prev)) return prev;
         return merged[0]?.uid ?? "";
@@ -208,7 +204,18 @@ export default function CRFPage() {
     const unsubOwner = onSnapshot(
       ownerQuery,
       (snap) => {
-        ownerRows = snap.docs.map((d) => d.data() as ProjectDoc);
+        ownerRows = snap.docs.map((d) => {
+          const data = d.data() as Partial<ProjectDoc>;
+          return {
+            uid: toStr(data.uid) || d.id,
+            name: toStr(data.name),
+            ownerUid: toStr(data.ownerUid),
+            ownerEmail: toStr(data.ownerEmail),
+            members: Array.isArray(data.members) ? data.members : [],
+            createdAt: data.createdAt,
+            updatedAt: data.updatedAt,
+          };
+        });
         ownerLoaded = true;
         applyMerged();
       },
@@ -222,7 +229,18 @@ export default function CRFPage() {
     const unsubMember = onSnapshot(
       memberQuery,
       (snap) => {
-        memberRows = snap.docs.map((d) => d.data() as ProjectDoc);
+        memberRows = snap.docs.map((d) => {
+          const data = d.data() as Partial<ProjectDoc>;
+          return {
+            uid: toStr(data.uid) || d.id,
+            name: toStr(data.name),
+            ownerUid: toStr(data.ownerUid),
+            ownerEmail: toStr(data.ownerEmail),
+            members: Array.isArray(data.members) ? data.members : [],
+            createdAt: data.createdAt,
+            updatedAt: data.updatedAt,
+          };
+        });
         memberLoaded = true;
         applyMerged();
       },
@@ -237,7 +255,7 @@ export default function CRFPage() {
       unsubOwner();
       unsubMember();
     };
-  }, [db, uid, selectedProjectId]);
+  }, [db, uid]);
 
   useEffect(() => {
     const found = projects.find((p) => p.uid === selectedProjectId) ?? null;
@@ -245,7 +263,13 @@ export default function CRFPage() {
   }, [projects, selectedProjectId]);
 
   const isOwner = !!uid && !!selectedProject && selectedProject.ownerUid === uid;
-  const canEdit = !!selectedProjectId && isOwner;
+  const isMember =
+    !!uid &&
+    !!selectedProject &&
+    Array.isArray(selectedProject.members) &&
+    selectedProject.members.includes(uid);
+
+  const canEdit = !!selectedProjectId && (isOwner || isMember);
 
   useEffect(() => {
     const run = async () => {
@@ -291,7 +315,7 @@ export default function CRFPage() {
     if (!uid) return setError("로그인이 필요합니다.");
     if (!selectedProjectId) return setError("프로젝트를 선택해주세요.");
     if (!selectedProject) return setError("선택된 프로젝트 정보를 찾을 수 없습니다.");
-    if (!isOwner) return setError("오너만 저장할 수 있습니다.");
+    if (!canEdit) return setError("해당 프로젝트의 수정 권한이 없습니다.");
 
     setSaving(true);
 
@@ -369,8 +393,8 @@ export default function CRFPage() {
       return;
     }
 
-    if (!isOwner) {
-      setError("오너만 Excel 업로드가 가능합니다.");
+    if (!canEdit) {
+      setError("해당 프로젝트의 수정 권한이 없습니다.");
       return;
     }
 
@@ -538,15 +562,15 @@ export default function CRFPage() {
       max-width: 72vw;
       padding: 8px 10px;
       border-radius: 10px;
-      border: 1px solid rgba(255,255,255,0.16);
-      background: #2f2f34;
-      color: #ffffff;
+      border: 1px solid #c9ccd3;
+      background: #ffffff;
+      color: #111111;
       outline: none;
       appearance: auto;
       -webkit-appearance: menulist;
       -moz-appearance: menulist;
-      color-scheme: dark;
-      -webkit-text-fill-color: #ffffff;
+      color-scheme: light;
+      -webkit-text-fill-color: #111111;
     }
 
     .project-select option{
@@ -652,10 +676,10 @@ export default function CRFPage() {
                   style={{
                     ...subtleText,
                     fontWeight: 900,
-                    color: isOwner ? "var(--ok)" : "var(--warn)",
+                    color: canEdit ? "var(--ok)" : "var(--warn)",
                   }}
                 >
-                  {isOwner ? "Owner 권한" : "Member 권한(조회만 가능)"}
+                  {isOwner ? "Owner 권한(수정 가능)" : isMember ? "Member 권한(수정 가능)" : "권한 확인 필요"}
                 </span>
               ) : null}
             </div>
@@ -697,7 +721,7 @@ export default function CRFPage() {
                 style={{ ...btnStyle, opacity: canEdit ? 1 : 0.6, cursor: canEdit ? "pointer" : "not-allowed" }}
                 onClick={() => inputExcelRef.current?.click()}
                 disabled={loading || !canEdit}
-                title={!canEdit ? "오너만 업로드 가능합니다." : "Excel 업로드"}
+                title={!canEdit ? "수정 권한이 있는 사용자만 업로드 가능합니다." : "Excel 업로드"}
               >
                 Excel 업로드(채우기)
               </button>
@@ -707,7 +731,7 @@ export default function CRFPage() {
                 style={{ ...btnStyle, opacity: canEdit ? 1 : 0.6, cursor: canEdit ? "pointer" : "not-allowed" }}
                 onClick={addRow}
                 disabled={loading || !canEdit}
-                title={!canEdit ? "오너만 추가 가능합니다." : "Form 추가"}
+                title={!canEdit ? "수정 권한이 있는 사용자만 추가 가능합니다." : "Form 추가"}
               >
                 Form 추가
               </button>
@@ -721,7 +745,7 @@ export default function CRFPage() {
                 }}
                 onClick={() => saveNow()}
                 disabled={saving || loading || !canEdit}
-                title={!canEdit ? "오너만 저장 가능합니다." : "저장"}
+                title={!canEdit ? "수정 권한이 있는 사용자만 저장 가능합니다." : "저장"}
               >
                 {saving ? "저장 중..." : "저장"}
               </button>
@@ -855,7 +879,7 @@ export default function CRFPage() {
                               cursor: canEdit ? "pointer" : "not-allowed",
                             }}
                             disabled={loading || !canEdit}
-                            title={!canEdit ? "오너만 삭제 가능합니다." : "삭제"}
+                            title={!canEdit ? "수정 권한이 있는 사용자만 삭제 가능합니다." : "삭제"}
                           >
                             -
                           </button>
@@ -875,7 +899,7 @@ export default function CRFPage() {
                                 cursor: canEdit ? "pointer" : "not-allowed",
                               }}
                               disabled={loading || !canEdit}
-                              title={!canEdit ? "오너만 추가 가능합니다." : "Form 추가"}
+                              title={!canEdit ? "수정 권한이 있는 사용자만 추가 가능합니다." : "Form 추가"}
                             >
                               +
                             </button>
