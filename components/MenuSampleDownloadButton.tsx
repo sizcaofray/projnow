@@ -90,6 +90,8 @@ export default function MenuSampleDownloadButton({
           downloadUrl,
           storagePath,
         });
+      } catch {
+        setMeta(null);
       } finally {
         setLoading(false);
       }
@@ -98,7 +100,33 @@ export default function MenuSampleDownloadButton({
     void run();
   }, [db, storage, menuPath, fallbackLabel]);
 
-  if (loading || !meta) return null;
+  if (loading) {
+    return (
+      <button
+        type="button"
+        className={className}
+        style={style}
+        disabled
+        title="샘플 정보를 불러오는 중입니다."
+      >
+        {fallbackLabel}
+      </button>
+    );
+  }
+
+  if (!meta) {
+    return (
+      <button
+        type="button"
+        className={className}
+        style={style}
+        disabled
+        title="연결된 샘플 파일이 없습니다. 메뉴 설정에서 샘플 파일을 등록하세요."
+      >
+        {fallbackLabel}
+      </button>
+    );
+  }
 
   return (
     <a
