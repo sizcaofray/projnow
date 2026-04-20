@@ -27,9 +27,10 @@ import {
   serverTimestamp,
   updateDoc,
 } from "firebase/firestore";
+import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 
 import { useAuth } from "@/lib/auth/useAuth";
-import { getFirebaseDb } from "@/lib/firebase/client";
+import { getFirebaseDb, getFirebaseStorage } from "@/lib/firebase/client";
 
 // ✅ dnd-kit
 import {
@@ -77,6 +78,13 @@ type MenuDoc = {
   // ✅ 기능 메뉴에서만 사용
   slug: string;
   path: string;
+
+  // ✅ 샘플 다운로드 관리
+  sampleEnabled?: boolean;
+  sampleFileName?: string;
+  sampleStoragePath?: string;
+  sampleDownloadLabel?: string;
+  sampleDownloadUrl?: string;
 };
 
 const COL = "menus";
@@ -84,6 +92,11 @@ const SLUG_REGEX = /^[a-z0-9_]+$/;
 
 const buildPath = (slug: string) => `/contents/${slug}`;
 const normalizeSlug = (raw: string) => raw.replace(/\s+/g, "").toLowerCase();
+const sanitizeFileName = (raw: string) =>
+  raw
+    .trim()
+    .replace(/[^a-zA-Z0-9._-가-힣]/g, "_")
+    .replace(/_+/g, "_");
 
 const resequence = (ids: string[]) => {
   const map = new Map<string, number>();
@@ -159,6 +172,8 @@ export default function MenuManagePage() {
 
     access: MenuAccess;
     parentId: string | null;
+    sampleEnabled: boolean;
+    sampleDownloadLabel: string;
   }>({
     name: "",
     hasPage: false,
@@ -167,6 +182,8 @@ export default function MenuManagePage() {
 
     access: "public",
     parentId: null,
+    sampleEnabled: false,
+    sampleDownloadLabel: "샘플 다운로드",
   });
 
   const [editId, setEditId] = useState("");
@@ -178,6 +195,8 @@ export default function MenuManagePage() {
 
     access: MenuAccess;
     parentId: string | null;
+    sampleEnabled: boolean;
+    sampleDownloadLabel: string;
   }>({
     name: "",
     hasPage: false,
@@ -186,10 +205,22 @@ export default function MenuManagePage() {
 
     access: "public",
     parentId: null,
+    sampleEnabled: false,
+    sampleDownloadLabel: "샘플 다운로드",
   });
 
   const [editOriginalSlug, setEditOriginalSlug] = useState("");
   const [editOriginalHasPage, setEditOriginalHasPage] = useState(false);
+  const [newSampleFile, setNewSampleFile] = useState<File | null>(null);
+  const [editSampleFile, setEditSampleFile] = useState<File | null>(null);
+
+  const storage = useMemo(() => {
+    try {
+      return getFirebaseStorage();
+    } catch {
+      return null;
+    }
+  }, []);
 
   /** ✅ 관리자 확인: users/{uid}.role === 'admin' */
   useEffect(() => {
@@ -260,6 +291,11 @@ export default function MenuManagePage() {
           paidOnly: Boolean(v.paidOnly ?? compat.paidOnly),
 
           parentId,
+          sampleEnabled: Boolean(v.sampleEnabled ?? false),
+          sampleFileName: String(v.sampleFileName ?? ""),
+          sampleStoragePath: String(v.sampleStoragePath ?? ""),
+          sampleDownloadLabel: String(v.sampleDownloadLabel ?? "샘플 다운로드"),
+          sampleDownloadUrl: String(v.sampleDownloadUrl ?? ""),
         };
       });
 
@@ -350,6 +386,24 @@ export default function MenuManagePage() {
     return "";
   };
 
+  const uploadSampleFile = async (menuId: string, slugOrId: string, file: File) => {
+    if (!storage) throw new Error("Firebase Storage 초기화에 실패했습니다.");
+
+    const safeName = sanitizeFileName(file.name || "sample.xlsx");
+    const folder = sanitizeFileName(slugOrId || menuId || "menu");
+    const storagePath = `sample-files/${folder}/${Date.now()}_${safeName}`;
+
+    const storageRef = ref(storage, storagePath);
+    await uploadBytes(storageRef, file);
+    const downloadUrl = await getDownloadURL(storageRef);
+
+    return {
+      sampleFileName: safeName,
+      sampleStoragePath: storagePath,
+      sampleDownloadUrl: downloadUrl,
+    };
+  };
+
   const nextOrderForParent = (parentId: string | null) => {
     const siblings = menus.filter((m) => (m.parentId ?? null) === (parentId ?? null));
     if (siblings.length === 0) return 10;
@@ -375,7 +429,7 @@ export default function MenuManagePage() {
       const compat = accessToCompat(form.access);
 
       setBusy(true);
-      await addDoc(collection(db, COL), {
+      const createdRef = await addDoc(collection(db, COL), {
         name: form.name.trim(),
         hasPage: form.hasPage,
         slug: finalSlug,
@@ -390,10 +444,30 @@ export default function MenuManagePage() {
 
         parentId: form.parentId ?? null,
         order,
+        sampleEnabled: form.sampleEnabled,
+        sampleFileName: "",
+        sampleStoragePath: "",
+        sampleDownloadLabel: form.sampleDownloadLabel.trim() || "샘플 다운로드",
+        sampleDownloadUrl: "",
         updatedAt: serverTimestamp(),
       });
 
-      setForm((p) => ({ ...p, name: "", slug: "" }));
+      if (form.sampleEnabled && newSampleFile) {
+        const uploaded = await uploadSampleFile(createdRef.id, finalSlug || createdRef.id, newSampleFile);
+        await updateDoc(createdRef, {
+          ...uploaded,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      setForm((p) => ({
+        ...p,
+        name: "",
+        slug: "",
+        sampleEnabled: false,
+        sampleDownloadLabel: "샘플 다운로드",
+      }));
+      setNewSampleFile(null);
       await loadMenus();
     } catch (e: any) {
       setErr(e?.message ?? "메뉴 추가에 실패했습니다.");
@@ -415,7 +489,10 @@ export default function MenuManagePage() {
 
       access: m.access ?? inferAccessFromLegacy(m),
       parentId: m.parentId ?? null,
+      sampleEnabled: Boolean(m.sampleEnabled ?? false),
+      sampleDownloadLabel: m.sampleDownloadLabel?.trim() || "샘플 다운로드",
     });
+    setEditSampleFile(null);
   };
 
   const saveEdit = async () => {
@@ -459,7 +536,7 @@ export default function MenuManagePage() {
       const parentChanged = (current?.parentId ?? null) !== (edit.parentId ?? null);
       const nextOrder = parentChanged ? nextOrderForParent(edit.parentId) : (current?.order ?? 10);
 
-      await updateDoc(doc(db, COL, editId), {
+      const updatePayload: any = {
         name: edit.name.trim(),
         hasPage: finalHasPage,
         slug: finalSlug,
@@ -474,12 +551,30 @@ export default function MenuManagePage() {
 
         parentId: edit.parentId ?? null,
         order: nextOrder,
+        sampleEnabled: edit.sampleEnabled,
+        sampleDownloadLabel: edit.sampleDownloadLabel.trim() || "샘플 다운로드",
         updatedAt: serverTimestamp(),
-      });
+      };
+
+      if (!edit.sampleEnabled) {
+        updatePayload.sampleFileName = "";
+        updatePayload.sampleStoragePath = "";
+        updatePayload.sampleDownloadUrl = "";
+      }
+
+      if (edit.sampleEnabled && editSampleFile) {
+        const uploaded = await uploadSampleFile(editId, finalSlug || editId, editSampleFile);
+        updatePayload.sampleFileName = uploaded.sampleFileName;
+        updatePayload.sampleStoragePath = uploaded.sampleStoragePath;
+        updatePayload.sampleDownloadUrl = uploaded.sampleDownloadUrl;
+      }
+
+      await updateDoc(doc(db, COL, editId), updatePayload);
 
       setEditId("");
       setEditOriginalSlug("");
       setEditOriginalHasPage(false);
+      setEditSampleFile(null);
       await loadMenus();
     } catch (e: any) {
       setErr(e?.message ?? "메뉴 수정에 실패했습니다.");
@@ -745,6 +840,41 @@ export default function MenuManagePage() {
                 <option value="admin">admin(관리자)</option>
               </select>
             </label>
+
+            <label className="text-sm">
+              샘플 다운로드 사용
+              <select
+                value={form.sampleEnabled ? "yes" : "no"}
+                onChange={(e) => setForm((p) => ({ ...p, sampleEnabled: e.target.value === "yes" }))}
+                className={INPUT_CLASS}
+              >
+                <option value="no">사용 안 함</option>
+                <option value="yes">사용</option>
+              </select>
+            </label>
+
+            <label className="text-sm">
+              샘플 버튼명
+              <input
+                value={form.sampleDownloadLabel}
+                onChange={(e) => setForm((p) => ({ ...p, sampleDownloadLabel: e.target.value }))}
+                className={INPUT_CLASS}
+                placeholder="예) Visit 샘플 다운로드"
+              />
+            </label>
+
+            <label className="text-sm md:col-span-2">
+              샘플 파일 업로드
+              <input
+                type="file"
+                accept=".xlsx,.xls,.csv,.zip,.pdf,.doc,.docx"
+                className={INPUT_CLASS}
+                onChange={(e) => setNewSampleFile(e.target.files?.[0] ?? null)}
+              />
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {newSampleFile ? `선택 파일: ${newSampleFile.name}` : "메뉴 추가 시 함께 업로드됩니다."}
+              </div>
+            </label>
           </div>
         </section>
 
@@ -763,12 +893,13 @@ export default function MenuManagePage() {
 
           <div className="overflow-x-auto">
             <div className="min-w-[980px]">
-              <div className="grid grid-cols-[60px_1fr_160px_120px_160px_180px] gap-2 border-b pb-2 text-sm font-semibold">
+              <div className="grid grid-cols-[60px_1fr_160px_120px_160px_180px_180px] gap-2 border-b pb-2 text-sm font-semibold">
                 <div> </div>
                 <div>메뉴</div>
                 <div className="text-gray-600 dark:text-gray-300">type</div>
                 <div className="text-gray-600 dark:text-gray-300">group</div>
                 <div>access</div>
+                <div>샘플</div>
                 <div>actions</div>
               </div>
 
@@ -884,6 +1015,48 @@ export default function MenuManagePage() {
                     <option value="admin">admin(관리자)</option>
                   </select>
                 </label>
+
+                <label className="text-sm">
+                  샘플 다운로드 사용
+                  <select
+                    value={edit.sampleEnabled ? "yes" : "no"}
+                    onChange={(e) => setEdit((p) => ({ ...p, sampleEnabled: e.target.value === "yes" }))}
+                    className={INPUT_CLASS}
+                  >
+                    <option value="no">사용 안 함</option>
+                    <option value="yes">사용</option>
+                  </select>
+                </label>
+
+                <label className="text-sm">
+                  샘플 버튼명
+                  <input
+                    value={edit.sampleDownloadLabel}
+                    onChange={(e) => setEdit((p) => ({ ...p, sampleDownloadLabel: e.target.value }))}
+                    className={INPUT_CLASS}
+                    placeholder="예) Visit 샘플 다운로드"
+                  />
+                </label>
+
+                <label className="text-sm md:col-span-2">
+                  샘플 파일 업로드
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls,.csv,.zip,.pdf,.doc,.docx"
+                    className={INPUT_CLASS}
+                    onChange={(e) => setEditSampleFile(e.target.files?.[0] ?? null)}
+                  />
+                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    {editSampleFile
+                      ? `선택 파일: ${editSampleFile.name}`
+                      : (() => {
+                          const current = menus.find((x) => x.id === editId);
+                          return current?.sampleFileName
+                            ? `현재 파일: ${current.sampleFileName}`
+                            : "현재 연결된 샘플 파일 없음";
+                        })()}
+                  </div>
+                </label>
               </div>
 
               <div className="mt-6 flex justify-end gap-2">
@@ -932,11 +1105,13 @@ function TreeRow(props: {
   const typeLabel = m.hasPage ? "기능(페이지)" : "카테고리";
   const pathLabel = m.hasPage ? m.path : "(경로 없음)";
 
+  const sampleLabel = m.sampleEnabled ? (m.sampleFileName || "사용") : "-";
+
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className="grid grid-cols-[60px_1fr_160px_120px_160px_180px] items-center gap-2 rounded-lg border px-2 py-2 text-sm"
+      className="grid grid-cols-[60px_1fr_160px_120px_160px_180px_180px] items-center gap-2 rounded-lg border px-2 py-2 text-sm"
     >
       <div className="flex items-center gap-2">
         <button
@@ -970,6 +1145,8 @@ function TreeRow(props: {
       <div className="truncate text-gray-600 dark:text-gray-300">{m.group || "-"}</div>
 
       <div>{accessLabel(m.access)}</div>
+
+      <div className="truncate text-gray-600 dark:text-gray-300">{sampleLabel}</div>
 
       <div className="flex justify-end gap-2">
         <button onClick={onEdit} className="rounded-lg border px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-900">
