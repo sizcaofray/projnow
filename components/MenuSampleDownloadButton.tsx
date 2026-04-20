@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { collection, getDocs, limit, query, where } from "firebase/firestore";
 import { getDownloadURL, ref } from "firebase/storage";
 import { getFirebaseDb, getFirebaseStorage } from "@/lib/firebase/client";
@@ -46,10 +46,16 @@ export default function MenuSampleDownloadButton({
 
   const [meta, setMeta] = useState<MenuSampleMeta | null>(null);
   const [loading, setLoading] = useState(true);
+  const [reason, setReason] = useState("");
 
   useEffect(() => {
     const run = async () => {
+      setLoading(true);
+      setMeta(null);
+      setReason("");
+
       if (!db) {
+        setReason("Firestore 초기화 실패");
         setLoading(false);
         return;
       }
@@ -59,7 +65,8 @@ export default function MenuSampleDownloadButton({
         const snap = await getDocs(q);
 
         if (snap.empty) {
-          setMeta(null);
+          setReason(`menus.path = "${menuPath}" 문서를 찾지 못했습니다.`);
+          setLoading(false);
           return;
         }
 
@@ -70,16 +77,25 @@ export default function MenuSampleDownloadButton({
         const storagePath = String(v?.sampleStoragePath ?? "").trim();
         let downloadUrl = String(v?.sampleDownloadUrl ?? "").trim();
 
+        if (!enabled) {
+          setReason("sampleEnabled=false");
+          setLoading(false);
+          return;
+        }
+
         if (!downloadUrl && storage && storagePath) {
           try {
             downloadUrl = await getDownloadURL(ref(storage, storagePath));
-          } catch {
-            downloadUrl = "";
+          } catch (e: any) {
+            setReason(`Storage URL 생성 실패: ${e?.message ?? "unknown error"}`);
+            setLoading(false);
+            return;
           }
         }
 
-        if (!enabled || !downloadUrl) {
-          setMeta(null);
+        if (!downloadUrl) {
+          setReason("sampleDownloadUrl / sampleStoragePath 없음");
+          setLoading(false);
           return;
         }
 
@@ -90,8 +106,8 @@ export default function MenuSampleDownloadButton({
           downloadUrl,
           storagePath,
         });
-      } catch {
-        setMeta(null);
+      } catch (e: any) {
+        setReason(e?.message ?? "샘플 조회 실패");
       } finally {
         setLoading(false);
       }
@@ -102,13 +118,7 @@ export default function MenuSampleDownloadButton({
 
   if (loading) {
     return (
-      <button
-        type="button"
-        className={className}
-        style={style}
-        disabled
-        title="샘플 정보를 불러오는 중입니다."
-      >
+      <button type="button" className={className} style={style} disabled title="샘플 정보를 불러오는 중입니다.">
         {fallbackLabel}
       </button>
     );
@@ -116,13 +126,7 @@ export default function MenuSampleDownloadButton({
 
   if (!meta) {
     return (
-      <button
-        type="button"
-        className={className}
-        style={style}
-        disabled
-        title="연결된 샘플 파일이 없습니다. 메뉴 설정에서 샘플 파일을 등록하세요."
-      >
+      <button type="button" className={className} style={style} disabled title={reason || "연결된 샘플 파일이 없습니다."}>
         {fallbackLabel}
       </button>
     );
@@ -131,7 +135,7 @@ export default function MenuSampleDownloadButton({
   return (
     <a
       href={meta.downloadUrl}
-      download={meta.fileName || true}
+      download={meta.fileName || undefined}
       target="_blank"
       rel="noreferrer"
       className={className}
