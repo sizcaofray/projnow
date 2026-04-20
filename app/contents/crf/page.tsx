@@ -12,6 +12,7 @@
  * 추가 수정:
  * - 프로젝트 select 박스는 다크모드 영향 없이 항상 밝은 배경/검정 글씨 고정
  * - snapshot 갱신 시 사용자가 선택한 프로젝트가 강제로 owner 프로젝트로 되돌아가는 문제 수정
+ * - 작업 영역에 샘플 다운로드 버튼 추가
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -373,7 +374,7 @@ export default function CRFPage() {
 
     setRows((prev) => {
       const next = prev.filter((r) => r.id !== rowId);
-      return next.length === 0 ? [makeEmptyRow()] : next;
+      return next.length > 0 ? next : [makeEmptyRow()];
     });
 
     setInfo("");
@@ -381,123 +382,52 @@ export default function CRFPage() {
 
   const updateRow = (rowId: string, patch: Partial<FormRow>) => {
     if (!canEdit) return;
-    setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, ...patch } : r)));
+
+    setRows((prev) =>
+      prev.map((r) =>
+        r.id === rowId
+          ? {
+              ...r,
+              ...patch,
+            }
+          : r
+      )
+    );
     setInfo("");
   };
 
-  const applyExcelFile = async (file: File) => {
-    setError("");
-    setInfo("");
-
-    if (!selectedProjectId) {
-      setError("프로젝트를 먼저 선택해주세요.");
-      return;
-    }
-
-    if (!canEdit) {
-      setError("해당 프로젝트의 수정 권한이 없습니다.");
-      return;
-    }
-
-    if (!/\.(xlsx|xls)$/i.test(file.name)) {
-      setError("엑셀 파일(.xlsx/.xls)만 업로드할 수 있습니다.");
-      return;
-    }
-
-    try {
-      setLoading(true);
-
-      const buf = await file.arrayBuffer();
-      const wb = XLSX.read(buf, { type: "array" });
-
-      const sheetName = wb.SheetNames?.[0];
-      if (!sheetName) {
-        setError("엑셀 시트를 찾을 수 없습니다.");
-        return;
-      }
-
-      const ws = wb.Sheets[sheetName];
-      const json = XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: "" });
-
-      const normalizeKey = (k: string) => k.replace(/\s+/g, "").toLowerCase();
-      const keys = Object.keys(json?.[0] ?? {});
-
-      const keyMap: Record<"formName" | "formCode" | "repeat", string | null> = {
-        formName: null,
-        formCode: null,
-        repeat: null,
-      };
-
-      for (const k of keys) {
-        const nk = normalizeKey(k);
-        if (!keyMap.formName && (nk === "formname" || nk === "form_name" || nk === "name")) keyMap.formName = k;
-        if (!keyMap.formCode && (nk === "formcode" || nk === "form_code" || nk === "code")) keyMap.formCode = k;
-        if (!keyMap.repeat && nk === "repeat") keyMap.repeat = k;
-      }
-
-      if (!keyMap.formName || !keyMap.formCode || !keyMap.repeat) {
-        setError('엑셀 헤더가 필요합니다: "Form Name", "Form Code", "Repeat"');
-        return;
-      }
-
-      const nextRows: FormRow[] = json
-        .map((r) => {
-          const formName = toStr(r[keyMap.formName as string]);
-          const formCode = toStr(r[keyMap.formCode as string]);
-          const repeat = toBoolRepeat(r[keyMap.repeat as string]);
-          if (!formName && !formCode) return null;
-
-          return {
-            id: newRowId(),
-            formName,
-            formCode,
-            repeat,
-            createdAt: Date.now(),
-          } as FormRow;
-        })
-        .filter(Boolean) as FormRow[];
-
-      if (nextRows.length === 0) {
-        setError("엑셀에서 유효한 데이터 행을 찾지 못했습니다. (Form Name/Form Code 확인)");
-        return;
-      }
-
-      setRows(nextRows);
-      setInfo(`엑셀(${file.name})로 ${nextRows.length}건을 채웠습니다. 저장 버튼을 눌러 반영하세요.`);
-    } catch (e: any) {
-      setError(e?.message ?? "엑셀 읽기 실패");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const onDragStartRow = (rowId: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
+  const onDragStartRow = (id: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
     if (!canEdit) return;
-    setDraggingId(rowId);
-    setOverId(rowId);
-    setInfo("");
-    e.dataTransfer.setData("text/plain", rowId);
+    setDraggingId(id);
+    setOverId(null);
     e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", id);
   };
 
-  const onDragOverRow = (rowId: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
+  const onDragOverRow = (id: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
     if (!canEdit) return;
     e.preventDefault();
-    setOverId(rowId);
-    e.dataTransfer.dropEffect = "move";
+    if (draggingId && draggingId !== id) {
+      setOverId(id);
+      e.dataTransfer.dropEffect = "move";
+    }
   };
 
-  const onDropRow = (rowId: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
+  const onDropRow = (id: string) => (e: React.DragEvent<HTMLTableRowElement>) => {
     if (!canEdit) return;
     e.preventDefault();
 
-    const activeId = e.dataTransfer.getData("text/plain") || draggingId;
-    if (!activeId) return;
+    const activeId = draggingId || e.dataTransfer.getData("text/plain");
+    if (!activeId || activeId === id) {
+      setDraggingId(null);
+      setOverId(null);
+      return;
+    }
 
-    setRows((prev) => reorderById(prev, activeId, rowId));
+    setRows((prev) => reorderById(prev, activeId, id));
     setDraggingId(null);
     setOverId(null);
-    setInfo("행 순서를 변경했습니다. 저장 버튼을 눌러 반영하세요.");
+    setInfo("");
   };
 
   const onDragEndRow = () => {
@@ -505,160 +435,220 @@ export default function CRFPage() {
     setOverId(null);
   };
 
-  const themeCss = `
-    .crf-wrap{
-      --text: #0b0f19;
-      --muted: rgba(11,15,25,0.7);
-      --card-bg: rgba(255,255,255,0.78);
-      --card-border: rgba(11,15,25,0.14);
-      --border: rgba(11,15,25,0.14);
-      --border-soft: rgba(11,15,25,0.10);
-      --btn-bg: rgba(255,255,255,0.90);
-      --btn-border: rgba(11,15,25,0.18);
-      --input-bg: rgba(255,255,255,0.92);
-      --input-border: rgba(11,15,25,0.18);
-      --danger: #c31919;
-      --ok: #0a7a2f;
-      --warn: #a36a00;
-    }
-    @media (prefers-color-scheme: dark){
-      .crf-wrap{
-        --text: #e8eefc;
-        --muted: rgba(232,238,252,0.72);
-        --card-bg: rgba(255,255,255,0.06);
-        --card-border: rgba(232,238,252,0.14);
-        --border: rgba(232,238,252,0.16);
-        --border-soft: rgba(232,238,252,0.10);
-        --btn-bg: rgba(255,255,255,0.08);
-        --btn-border: rgba(232,238,252,0.16);
-        --input-bg: rgba(255,255,255,0.08);
-        --input-border: rgba(232,238,252,0.18);
-        --danger: #ff6b6b;
-        --ok: #41d17a;
-        --warn: #ffb020;
-      }
+  const downloadExcel = () => {
+    const body = rows.map((r) => ({
+      FormName: r.formName ?? "",
+      FormCode: r.formCode ?? "",
+      Repeat: r.repeat ? "Y" : "",
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(body, {
+      header: ["FormName", "FormCode", "Repeat"],
+    });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "CRF");
+    XLSX.writeFile(wb, "crf_forms.xlsx");
+  };
+
+  const applyExcelFile = async (file: File) => {
+    if (!canEdit) {
+      setError("수정 권한이 있는 사용자만 업로드 가능합니다.");
+      return;
     }
 
-    .plus-wrap{ position: relative; display: inline-flex; }
-    .plus-tip{
-      position: absolute;
-      left: 50%;
-      transform: translateX(-50%);
-      top: calc(100% + 6px);
-      white-space: nowrap;
-      padding: 6px 10px;
-      border-radius: 10px;
-      border: 1px solid var(--border);
-      background: var(--card-bg);
-      color: var(--text);
-      font-size: 12px;
-      font-weight: 900;
-      box-shadow: 0 6px 18px rgba(0,0,0,0.14);
-      z-index: 50;
-      pointer-events: none;
-    }
+    setError("");
+    setInfo("");
 
-    .project-select{
-      width: 360px;
-      max-width: 72vw;
-      padding: 8px 10px;
-      border-radius: 10px;
-      border: 1px solid #c9ccd3;
-      background: #ffffff;
-      color: #111111;
-      outline: none;
-      appearance: auto;
-      -webkit-appearance: menulist;
-      -moz-appearance: menulist;
-      color-scheme: light;
-      -webkit-text-fill-color: #111111;
-    }
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const first = wb.SheetNames?.[0];
+      if (!first) throw new Error("시트를 찾을 수 없습니다.");
 
-    .project-select option{
-      background: #ffffff;
-      color: #111111;
+      const ws = wb.Sheets[first];
+      const json = XLSX.utils.sheet_to_json<any>(ws, { defval: "" });
+
+      const imported: FormRow[] = json.map((r: any) => ({
+        id: newRowId(),
+        formName: toStr(r.FormName ?? r["Form Name"] ?? r.formName ?? r.form_name),
+        formCode: toStr(r.FormCode ?? r["Form Code"] ?? r.formCode ?? r.form_code),
+        repeat: toBoolRepeat(r.Repeat ?? r.repeat),
+        createdAt: Date.now(),
+      }));
+
+      const normalized = imported.filter((r) => r.formName || r.formCode);
+      setRows(normalized.length > 0 ? normalized : [makeEmptyRow()]);
+      setInfo("엑셀 내용을 화면에 반영했습니다. 저장 버튼으로 확정하세요.");
+    } catch (e: any) {
+      setError(e?.message ?? "엑셀 업로드 실패");
     }
-  `;
+  };
+
+  const pageStyle: React.CSSProperties = {
+    minHeight: "100vh",
+    background: "var(--bg)",
+    color: "var(--text)",
+    padding: 16,
+  };
 
   const cardStyle: React.CSSProperties = {
-    border: "1px solid var(--card-border)",
-    borderRadius: 12,
+    background: "var(--panel)",
+    border: "1px solid var(--border)",
+    borderRadius: 16,
     padding: 14,
-    background: "var(--card-bg)",
-    backdropFilter: "blur(6px)",
-    color: "var(--text)",
+    boxShadow: "0 8px 24px rgba(0,0,0,.08)",
   };
 
-  const btnStyle: React.CSSProperties = {
-    padding: "8px 12px",
-    borderRadius: 10,
-    border: "1px solid var(--btn-border)",
-    background: "var(--btn-bg)",
-    color: "var(--text)",
-    cursor: "pointer",
+  const titleStyle: React.CSSProperties = {
+    fontSize: 22,
     fontWeight: 800,
+    margin: 0,
   };
 
-  const subtleText: React.CSSProperties = { fontSize: 12, opacity: 0.85, color: "var(--muted)" };
+  const subtleText: React.CSSProperties = {
+    fontSize: 13,
+    color: "var(--muted)",
+  };
+
+  const sectionTitleStyle: React.CSSProperties = {
+    fontSize: 16,
+    fontWeight: 800,
+    margin: 0,
+  };
+
+  const rowFlex: React.CSSProperties = {
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    flexWrap: "wrap",
+  };
 
   const inputStyle: React.CSSProperties = {
     width: "100%",
-    padding: "8px 10px",
+    padding: "10px 12px",
     borderRadius: 10,
-    border: "1px solid var(--input-border)",
-    background: "var(--input-bg)",
+    border: "1px solid var(--border)",
+    background: "var(--panel-2)",
     color: "var(--text)",
     outline: "none",
   };
 
-  const SectionHeader = ({ title, right }: { title: string; right?: React.ReactNode }) => (
+  const selectStyleAlwaysLight: React.CSSProperties = {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 10,
+    border: "1px solid #cbd5e1",
+    background: "#ffffff",
+    color: "#111111",
+    outline: "none",
+  };
+
+  const btnStyle: React.CSSProperties = {
+    padding: "10px 14px",
+    borderRadius: 10,
+    border: "1px solid var(--border)",
+    background: "var(--panel-2)",
+    color: "var(--text)",
+    cursor: "pointer",
+    fontWeight: 700,
+    textDecoration: "none",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+  };
+
+  const SectionHeader = ({
+    title,
+    right,
+  }: {
+    title: string;
+    right?: React.ReactNode;
+  }) => (
     <div
-      style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}
+      style={{
+        ...rowFlex,
+        justifyContent: "space-between",
+        marginBottom: 10,
+      }}
     >
-      <div style={{ fontWeight: 900, color: "var(--text)" }}>{title}</div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>{right}</div>
+      <h2 style={sectionTitleStyle}>{title}</h2>
+      <div style={rowFlex}>{right}</div>
     </div>
   );
 
   if (loadingUser) {
     return (
-      <div className="crf-wrap" style={{ padding: 18, maxWidth: 1100, margin: "0 auto" }}>
-        <style>{themeCss}</style>
-        <div style={cardStyle}>로딩 중...</div>
-      </div>
-    );
-  }
-
-  if (!uid) {
-    return (
-      <div className="crf-wrap" style={{ padding: 18, maxWidth: 1100, margin: "0 auto" }}>
-        <style>{themeCss}</style>
-        <div style={cardStyle}>
-          <div style={{ fontWeight: 900, marginBottom: 6 }}>로그인이 필요합니다.</div>
-          <div style={subtleText}>Google 로그인 후 사용하실 수 있습니다.</div>
-        </div>
+      <div style={pageStyle}>
+        <div style={cardStyle}>사용자 정보를 불러오는 중입니다...</div>
       </div>
     );
   }
 
   return (
-    <div className="crf-wrap" style={{ padding: 18, maxWidth: 1300, margin: "0 auto" }}>
-      <style>{themeCss}</style>
+    <div style={pageStyle}>
+      <style jsx>{`
+        :global(:root) {
+          --bg: #f8fafc;
+          --panel: #ffffff;
+          --panel-2: #f8fafc;
+          --text: #0f172a;
+          --muted: #64748b;
+          --border: #cbd5e1;
+          --border-soft: #e2e8f0;
+          --ok: #166534;
+          --danger: #b91c1c;
+          --warn: #a16207;
+        }
+        :global(.dark) {
+          --bg: #0b1220;
+          --panel: #0f172a;
+          --panel-2: #111827;
+          --text: #e5e7eb;
+          --muted: #94a3b8;
+          --border: #334155;
+          --border-soft: #1f2937;
+          --ok: #86efac;
+          --danger: #fca5a5;
+          --warn: #fde68a;
+        }
+        .plus-wrap {
+          position: relative;
+          display: inline-flex;
+          align-items: center;
+        }
+        .plus-tip {
+          position: absolute;
+          left: 50%;
+          transform: translateX(-50%);
+          top: -34px;
+          white-space: nowrap;
+          background: rgba(15, 23, 42, 0.95);
+          color: white;
+          padding: 4px 8px;
+          border-radius: 8px;
+          font-size: 12px;
+          line-height: 1;
+          pointer-events: none;
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+        }
+      `}</style>
 
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 900, margin: 0, color: "var(--text)" }}>CRF Form Builder</h1>
-        <span style={subtleText}>/contents/crf</span>
+      <div style={{ ...cardStyle, marginBottom: 14 }}>
+        <h1 style={titleStyle}>CRF Form Builder</h1>
+        <div style={{ ...subtleText, marginTop: 6 }}>
+          프로젝트를 선택한 뒤 해당 프로젝트의 CRF를 조회/저장합니다. owner + member 모두 수정 가능합니다.
+        </div>
       </div>
 
       <div style={{ ...cardStyle, marginBottom: 14 }}>
         <SectionHeader
           title="프로젝트 선택"
           right={
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ minWidth: 320, width: "100%", maxWidth: 520 }}>
               <select
                 value={selectedProjectId}
                 onChange={(e) => setSelectedProjectId(e.target.value)}
-                className="project-select"
+                style={selectStyleAlwaysLight}
                 disabled={loadingProjects || projects.length === 0}
               >
                 {projects.length === 0 ? (
@@ -666,23 +656,11 @@ export default function CRFPage() {
                 ) : (
                   projects.map((p) => (
                     <option key={p.uid} value={p.uid}>
-                      {p.uid} : {p.name}
+                      {p.name || p.uid}
                     </option>
                   ))
                 )}
               </select>
-
-              {selectedProject ? (
-                <span
-                  style={{
-                    ...subtleText,
-                    fontWeight: 900,
-                    color: canEdit ? "var(--ok)" : "var(--warn)",
-                  }}
-                >
-                  {isOwner ? "Owner 권한(수정 가능)" : isMember ? "Member 권한(수정 가능)" : "권한 확인 필요"}
-                </span>
-              ) : null}
             </div>
           }
         />
@@ -711,6 +689,12 @@ export default function CRFPage() {
                   if (f) applyExcelFile(f);
                   if (e.currentTarget) e.currentTarget.value = "";
                 }}
+              />
+
+              <MenuSampleDownloadButton
+                menuPath="/contents/crf"
+                fallbackLabel="CRF 샘플 다운로드"
+                className="inline-flex items-center justify-center rounded-[10px] border px-[14px] py-[10px] text-sm font-bold no-underline hover:opacity-90"
               />
 
               <span style={{ ...subtleText, color: "var(--warn)", fontWeight: 900 }}>

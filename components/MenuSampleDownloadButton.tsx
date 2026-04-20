@@ -17,14 +17,16 @@ type Props = {
   menuPath: string;
   className?: string;
   fallbackLabel?: string;
+  style?: React.CSSProperties;
 };
 
 const COL = "menus";
 
 export default function MenuSampleDownloadButton({
   menuPath,
-  className = "px-3 py-2 rounded border text-sm hover:opacity-90",
+  className,
   fallbackLabel = "샘플 다운로드",
+  style,
 }: Props) {
   const db = useMemo(() => {
     try {
@@ -105,6 +107,7 @@ export default function MenuSampleDownloadButton({
       target="_blank"
       rel="noreferrer"
       className={className}
+      style={style}
       title={meta.fileName || meta.label}
     >
       {meta.label}
