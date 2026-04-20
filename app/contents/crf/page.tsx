@@ -713,6 +713,11 @@ export default function CRFPage() {
                 }}
               />
 
+              <MenuSampleDownloadButton
+                menuPath="/contents/crf"
+                fallbackLabel="CRF 샘플 다운로드"
+              />
+
               <span style={{ ...subtleText, color: "var(--warn)", fontWeight: 900 }}>
                 파일 업로드 시 기존 내용은 사라집니다.
               </span>
