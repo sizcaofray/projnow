@@ -4,14 +4,9 @@
  * app/contents/menu/page.tsx
  *
  * ✅ 반영 사항
- * 1) 상위 메뉴(소속) Select 옵션을 트리 구조대로 들여쓰기 표시
- * 2) select/input 글자색이 브라우저 기본값을 타는 문제 해결(다크/라이트 모두 가독)
- *
- * ✅ 유지 사항
- * - 메뉴 접근 등급(access) 유지
- * - 기존 필드(isActive/adminOnly/paidOnly) 호환 유지
- * - 목록 Row의 "같은레벨 추가 / 하위메뉴" 버튼 없음
- * - 계층 지정은 "상위 메뉴(소속)" select로만 처리
+ * - Firebase Storage 제거
+ * - 샘플파일은 public 경로 입력 방식 사용
+ * - 샘플 경로 입력 후 수정 저장 시 값이 유지되도록 수정
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -27,12 +22,10 @@ import {
   serverTimestamp,
   updateDoc,
 } from "firebase/firestore";
-import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 
 import { useAuth } from "@/lib/auth/useAuth";
-import { getFirebaseDb, getFirebaseStorage } from "@/lib/firebase/client";
+import { getFirebaseDb } from "@/lib/firebase/client";
 
-// ✅ dnd-kit
 import {
   DndContext,
   closestCenter,
@@ -50,36 +43,21 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-/** ✅ 메뉴 접근 등급 */
 type MenuAccess = "disabled" | "public" | "paid" | "admin";
 
-/** ✅ Firestore 메뉴 문서 타입 */
 type MenuDoc = {
   id: string;
-
-  // ✅ 공통
   name: string;
   group: string;
   order: number;
-
-  /** ✅ 신규: 접근 등급(단일 필드로 관리) */
   access: MenuAccess;
-
-  /** ✅ 호환 필드(기존 구조와의 호환용) */
-  isActive: boolean; // access !== 'disabled'
-  adminOnly: boolean; // access === 'admin'
-  paidOnly: boolean; // access === 'paid'
-
+  isActive: boolean;
+  adminOnly: boolean;
+  paidOnly: boolean;
   parentId: string | null;
-
-  // ✅ 타입
-  hasPage: boolean; // true=기능(페이지), false=카테고리
-
-  // ✅ 기능 메뉴에서만 사용
+  hasPage: boolean;
   slug: string;
   path: string;
-
-  // ✅ 샘플 다운로드 관리
   sampleEnabled?: boolean;
   sampleFileName?: string;
   sampleStoragePath?: string;
@@ -92,11 +70,12 @@ const SLUG_REGEX = /^[a-z0-9_]+$/;
 
 const buildPath = (slug: string) => `/contents/${slug}`;
 const normalizeSlug = (raw: string) => raw.replace(/\s+/g, "").toLowerCase();
-const sanitizeFileName = (raw: string) =>
-  raw
-    .trim()
-    .replace(/[^a-zA-Z0-9._-가-힣]/g, "_")
-    .replace(/_+/g, "_");
+
+const getFileNameFromPath = (path: string) => {
+  const clean = path.trim();
+  if (!clean) return "";
+  return clean.split("/").pop() || "";
+};
 
 const resequence = (ids: string[]) => {
   const map = new Map<string, number>();
@@ -104,7 +83,6 @@ const resequence = (ids: string[]) => {
   return map;
 };
 
-/** ✅ access -> (isActive/adminOnly/paidOnly) 동기화 */
 const accessToCompat = (access: MenuAccess) => {
   const isActive = access !== "disabled";
   const adminOnly = access === "admin";
@@ -112,7 +90,6 @@ const accessToCompat = (access: MenuAccess) => {
   return { isActive, adminOnly, paidOnly };
 };
 
-/** ✅ 기존 문서(isActive/adminOnly/paidOnly) -> access 추론 */
 const inferAccessFromLegacy = (v: any): MenuAccess => {
   const isActive = v?.isActive ?? true;
   const adminOnly = v?.adminOnly ?? false;
@@ -124,11 +101,6 @@ const inferAccessFromLegacy = (v: any): MenuAccess => {
   return "public";
 };
 
-/**
- * ✅ 공통 입력 UI 클래스
- * - select 옵션 텍스트가 다크에서 안 보이는 문제를 막기 위해 text 색상 명시
- * - 배경/보더도 다크 variant 지정
- */
 const INPUT_CLASS =
   "mt-1 w-full rounded-lg border px-3 py-2 " +
   "bg-white text-gray-900 border-gray-200 " +
@@ -169,21 +141,21 @@ export default function MenuManagePage() {
     hasPage: boolean;
     slug: string;
     group: string;
-
     access: MenuAccess;
     parentId: string | null;
     sampleEnabled: boolean;
     sampleDownloadLabel: string;
+    sampleDownloadUrl: string;
   }>({
     name: "",
     hasPage: false,
     slug: "",
     group: "Workspace",
-
     access: "public",
     parentId: null,
     sampleEnabled: false,
     sampleDownloadLabel: "샘플 다운로드",
+    sampleDownloadUrl: "",
   });
 
   const [editId, setEditId] = useState("");
@@ -192,37 +164,26 @@ export default function MenuManagePage() {
     hasPage: boolean;
     slug: string;
     group: string;
-
     access: MenuAccess;
     parentId: string | null;
     sampleEnabled: boolean;
     sampleDownloadLabel: string;
+    sampleDownloadUrl: string;
   }>({
     name: "",
     hasPage: false,
     slug: "",
     group: "",
-
     access: "public",
     parentId: null,
     sampleEnabled: false,
     sampleDownloadLabel: "샘플 다운로드",
+    sampleDownloadUrl: "",
   });
 
   const [editOriginalSlug, setEditOriginalSlug] = useState("");
   const [editOriginalHasPage, setEditOriginalHasPage] = useState(false);
-  const [newSampleFile, setNewSampleFile] = useState<File | null>(null);
-  const [editSampleFile, setEditSampleFile] = useState<File | null>(null);
 
-  const storage = useMemo(() => {
-    try {
-      return getFirebaseStorage();
-    } catch {
-      return null;
-    }
-  }, []);
-
-  /** ✅ 관리자 확인: users/{uid}.role === 'admin' */
   useEffect(() => {
     const run = async () => {
       setErr("");
@@ -248,10 +209,10 @@ export default function MenuManagePage() {
     run();
   }, [user, db]);
 
-  /** ✅ 메뉴 로드 */
   const loadMenus = async () => {
     try {
       setErr("");
+
       if (!db) {
         setErr("Firestore 초기화에 실패했습니다. Firebase 환경변수를 확인해주세요.");
         return;
@@ -272,7 +233,6 @@ export default function MenuManagePage() {
         const parentIdRaw = v.parentId ?? null;
         const parentId = parentIdRaw === "" ? null : (parentIdRaw as string | null);
 
-        // ✅ 신규 access 읽기 (없으면 기존 필드로 추론)
         const access: MenuAccess = (v.access as MenuAccess) ?? inferAccessFromLegacy(v);
         const compat = accessToCompat(access);
 
@@ -301,9 +261,6 @@ export default function MenuManagePage() {
 
       setMenus(rows);
 
-      /**
-       * ✅ 최초 1회만: "자식이 있는 모든 부모 메뉴"를 expanded=true로 자동 펼침
-       */
       setExpanded((prev) => {
         if (Object.keys(prev).length > 0) return prev;
 
@@ -337,11 +294,13 @@ export default function MenuManagePage() {
 
   const childrenByParent = useMemo(() => {
     const map = new Map<string | null, MenuDoc[]>();
+
     menus.forEach((m) => {
       const key = m.parentId ?? null;
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(m);
     });
+
     map.forEach((arr) => arr.sort((a, b) => a.order - b.order));
     return map;
   }, [menus]);
@@ -351,6 +310,7 @@ export default function MenuManagePage() {
 
     const walk = (parentId: string | null, depth: number) => {
       const kids = childrenByParent.get(parentId) ?? [];
+
       for (const node of kids) {
         const hasChildren = (childrenByParent.get(node.id) ?? []).length > 0;
         const isOpen = expanded[node.id] ?? false;
@@ -367,46 +327,35 @@ export default function MenuManagePage() {
 
   const siblingIdsByParentVisible = useMemo(() => {
     const map = new Map<string | null, string[]>();
+
     flatVisible.forEach((m) => {
       const key = m.parentId ?? null;
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(m.id);
     });
+
     return map;
   }, [flatVisible]);
 
   const validate = (payload: { name: string; hasPage: boolean; slug: string }) => {
     if (!payload.name.trim()) return "메뉴명을 입력해주세요.";
+
     if (payload.hasPage) {
       if (!payload.slug.trim()) return "기능(페이지 있음) 메뉴는 폴더명(영문)이 필수입니다.";
+
       if (!SLUG_REGEX.test(payload.slug)) {
         return "폴더명은 소문자 영문/숫자/_ 만 가능합니다. (공백/특수문자 불가)";
       }
     }
+
     return "";
-  };
-
-  const uploadSampleFile = async (menuId: string, slugOrId: string, file: File) => {
-    if (!storage) throw new Error("Firebase Storage 초기화에 실패했습니다.");
-
-    const safeName = sanitizeFileName(file.name || "sample.xlsx");
-    const folder = sanitizeFileName(slugOrId || menuId || "menu");
-    const storagePath = `sample-files/${folder}/${Date.now()}_${safeName}`;
-
-    const storageRef = ref(storage, storagePath);
-    await uploadBytes(storageRef, file);
-    const downloadUrl = await getDownloadURL(storageRef);
-
-    return {
-      sampleFileName: safeName,
-      sampleStoragePath: storagePath,
-      sampleDownloadUrl: downloadUrl,
-    };
   };
 
   const nextOrderForParent = (parentId: string | null) => {
     const siblings = menus.filter((m) => (m.parentId ?? null) === (parentId ?? null));
+
     if (siblings.length === 0) return 10;
+
     const maxOrder = Math.max(...siblings.map((s) => s.order || 0));
     return maxOrder + 10;
   };
@@ -414,11 +363,13 @@ export default function MenuManagePage() {
   const addMenu = async () => {
     try {
       setErr("");
+
       if (!isAdmin) return setErr("관리자만 메뉴를 추가할 수 있습니다.");
       if (!db) return;
 
       const normalizedSlug = normalizeSlug(form.slug);
       const msg = validate({ name: form.name, hasPage: form.hasPage, slug: normalizedSlug });
+
       if (msg) return setErr(msg);
 
       const order = nextOrderForParent(form.parentId);
@@ -428,8 +379,12 @@ export default function MenuManagePage() {
 
       const compat = accessToCompat(form.access);
 
+      const sampleUrl = form.sampleDownloadUrl.trim();
+      const sampleEnabled = form.sampleEnabled || sampleUrl.length > 0;
+
       setBusy(true);
-      const createdRef = await addDoc(collection(db, COL), {
+
+      await addDoc(collection(db, COL), {
         name: form.name.trim(),
         hasPage: form.hasPage,
         slug: finalSlug,
@@ -444,21 +399,15 @@ export default function MenuManagePage() {
 
         parentId: form.parentId ?? null,
         order,
-        sampleEnabled: form.sampleEnabled,
-        sampleFileName: "",
+
+        sampleEnabled,
+        sampleFileName: getFileNameFromPath(sampleUrl),
         sampleStoragePath: "",
         sampleDownloadLabel: form.sampleDownloadLabel.trim() || "샘플 다운로드",
-        sampleDownloadUrl: "",
+        sampleDownloadUrl: sampleUrl,
+
         updatedAt: serverTimestamp(),
       });
-
-      if (form.sampleEnabled && newSampleFile) {
-        const uploaded = await uploadSampleFile(createdRef.id, finalSlug || createdRef.id, newSampleFile);
-        await updateDoc(createdRef, {
-          ...uploaded,
-          updatedAt: serverTimestamp(),
-        });
-      }
 
       setForm((p) => ({
         ...p,
@@ -466,8 +415,9 @@ export default function MenuManagePage() {
         slug: "",
         sampleEnabled: false,
         sampleDownloadLabel: "샘플 다운로드",
+        sampleDownloadUrl: "",
       }));
-      setNewSampleFile(null);
+
       await loadMenus();
     } catch (e: any) {
       setErr(e?.message ?? "메뉴 추가에 실패했습니다.");
@@ -489,27 +439,27 @@ export default function MenuManagePage() {
 
       access: m.access ?? inferAccessFromLegacy(m),
       parentId: m.parentId ?? null,
+
       sampleEnabled: Boolean(m.sampleEnabled ?? false),
       sampleDownloadLabel: m.sampleDownloadLabel?.trim() || "샘플 다운로드",
+      sampleDownloadUrl: m.sampleDownloadUrl?.trim() || "",
     });
-    setEditSampleFile(null);
   };
 
   const saveEdit = async () => {
     try {
       setErr("");
+
       if (!isAdmin) return setErr("관리자만 메뉴를 수정할 수 있습니다.");
       if (!db) return;
       if (!editId) return;
 
-      // ✅ 기능 → 카테고리 전환 금지
       if (editOriginalHasPage === true && edit.hasPage === false) {
         return setErr("기능(페이지 있음) 메뉴를 카테고리로 변경할 수 없습니다. 삭제 후 새로 생성해주세요.");
       }
 
       const normalizedSlug = normalizeSlug(edit.slug);
 
-      // ✅ 기존 기능 메뉴는 slug 불변
       if (editOriginalHasPage === true && normalizedSlug !== editOriginalSlug) {
         return setErr("폴더명(영문)은 변경할 수 없습니다. 변경하려면 삭제 후 새로 생성해주세요.");
       }
@@ -530,11 +480,12 @@ export default function MenuManagePage() {
 
       const compat = accessToCompat(edit.access);
 
-      setBusy(true);
-
       const current = menus.find((m) => m.id === editId);
       const parentChanged = (current?.parentId ?? null) !== (edit.parentId ?? null);
-      const nextOrder = parentChanged ? nextOrderForParent(edit.parentId) : (current?.order ?? 10);
+      const nextOrder = parentChanged ? nextOrderForParent(edit.parentId) : current?.order ?? 10;
+
+      const sampleUrl = edit.sampleDownloadUrl.trim();
+      const sampleEnabled = edit.sampleEnabled || sampleUrl.length > 0;
 
       const updatePayload: any = {
         name: edit.name.trim(),
@@ -551,30 +502,24 @@ export default function MenuManagePage() {
 
         parentId: edit.parentId ?? null,
         order: nextOrder,
-        sampleEnabled: edit.sampleEnabled,
+
+        sampleEnabled,
+        sampleFileName: getFileNameFromPath(sampleUrl),
+        sampleStoragePath: "",
         sampleDownloadLabel: edit.sampleDownloadLabel.trim() || "샘플 다운로드",
+        sampleDownloadUrl: sampleUrl,
+
         updatedAt: serverTimestamp(),
       };
 
-      if (!edit.sampleEnabled) {
-        updatePayload.sampleFileName = "";
-        updatePayload.sampleStoragePath = "";
-        updatePayload.sampleDownloadUrl = "";
-      }
-
-      if (edit.sampleEnabled && editSampleFile) {
-        const uploaded = await uploadSampleFile(editId, finalSlug || editId, editSampleFile);
-        updatePayload.sampleFileName = uploaded.sampleFileName;
-        updatePayload.sampleStoragePath = uploaded.sampleStoragePath;
-        updatePayload.sampleDownloadUrl = uploaded.sampleDownloadUrl;
-      }
+      setBusy(true);
 
       await updateDoc(doc(db, COL, editId), updatePayload);
 
       setEditId("");
       setEditOriginalSlug("");
       setEditOriginalHasPage(false);
-      setEditSampleFile(null);
+
       await loadMenus();
     } catch (e: any) {
       setErr(e?.message ?? "메뉴 수정에 실패했습니다.");
@@ -586,14 +531,15 @@ export default function MenuManagePage() {
   const removeMenu = async (id: string) => {
     try {
       setErr("");
+
       if (!isAdmin) return setErr("관리자만 메뉴를 삭제할 수 있습니다.");
       if (!db) return;
 
       const hasChildren = menus.some((m) => m.parentId === id);
       if (hasChildren) return setErr("하위 메뉴가 존재합니다. 하위 메뉴를 먼저 삭제해주세요.");
 
-      // ✅ 기능(페이지) 메뉴 삭제 시: 수동 파일 정리 확인
       const target = menus.find((m) => m.id === id);
+
       if (target?.hasPage && target.slug) {
         const ok = window.confirm(
           [
@@ -605,10 +551,12 @@ export default function MenuManagePage() {
             "확인 후 메뉴를 삭제하시겠습니까?",
           ].join("\n")
         );
+
         if (!ok) return;
       }
 
       setBusy(true);
+
       await deleteDoc(doc(db, COL, id));
       await loadMenus();
     } catch (e: any) {
@@ -626,10 +574,12 @@ export default function MenuManagePage() {
   const onDragEnd = async (event: DragEndEvent) => {
     try {
       setErr("");
+
       if (!isAdmin) return;
       if (!db) return;
 
       const { active, over } = event;
+
       if (!over) return;
       if (active.id === over.id) return;
 
@@ -638,6 +588,7 @@ export default function MenuManagePage() {
 
       const activeMenu = menus.find((m) => m.id === activeId);
       const overMenu = menus.find((m) => m.id === overId);
+
       if (!activeMenu || !overMenu) return;
 
       const activeParent = activeMenu.parentId ?? null;
@@ -651,6 +602,7 @@ export default function MenuManagePage() {
       const siblingsVisible = siblingIdsByParentVisible.get(activeParent) ?? [];
       const oldIndex = siblingsVisible.indexOf(activeId);
       const newIndex = siblingsVisible.indexOf(overId);
+
       if (oldIndex < 0 || newIndex < 0) return;
 
       const moved = arrayMove(siblingsVisible, oldIndex, newIndex);
@@ -659,6 +611,7 @@ export default function MenuManagePage() {
       setBusy(true);
 
       const updates: Promise<void>[] = [];
+
       const nextMenus = menus.map((m) => {
         if ((m.parentId ?? null) !== activeParent) return m;
 
@@ -672,8 +625,10 @@ export default function MenuManagePage() {
               updatedAt: serverTimestamp(),
             }) as unknown as Promise<void>
           );
+
           return { ...m, order: nextOrder };
         }
+
         return m;
       });
 
@@ -694,16 +649,11 @@ export default function MenuManagePage() {
   const previewEditSlug = editOriginalHasPage ? editOriginalSlug : normalizeSlug(edit.slug || "slug_here");
   const previewEditPath = edit.hasPage ? buildPath(previewEditSlug) : "(카테고리: 경로 없음)";
 
-  /**
-   * ✅ 상위 메뉴(소속) 옵션을 트리 구조로 생성(들여쓰기 포함)
-   * - HTML <option>은 공백이 무시될 수 있어 NBSP(\u00A0) 사용
-   * - 카테고리는 [카테고리], 기능은 [기능] 표시로 구분
-   */
   const parentOptions = useMemo(() => {
     const opts: Array<{ id: string | null; label: string }> = [{ id: null, label: "(최상위)" }];
 
     const labelFor = (m: MenuDoc, depth: number) => {
-      const nb = "\u00A0"; // non-breaking space
+      const nb = "\u00A0";
       const indent = nb.repeat(depth * 4);
       const branch = depth > 0 ? "└ " : "";
       const kind = m.hasPage ? "[기능]" : "[카테고리]";
@@ -712,6 +662,7 @@ export default function MenuManagePage() {
 
     const walk = (parentId: string | null, depth: number) => {
       const kids = childrenByParent.get(parentId) ?? [];
+
       for (const m of kids) {
         opts.push({ id: m.id, label: labelFor(m, depth) });
         walk(m.id, depth + 1);
@@ -722,9 +673,10 @@ export default function MenuManagePage() {
     return opts;
   }, [childrenByParent]);
 
-  const toggleExpand = (id: string) => setExpanded((p) => ({ ...p, [id]: !(p[id] ?? false) }));
+  const toggleExpand = (id: string) => {
+    setExpanded((p) => ({ ...p, [id]: !(p[id] ?? false) }));
+  };
 
-  /** ✅ access 표시 라벨 */
   const accessLabel = (a: MenuAccess) => {
     if (a === "disabled") return "비활성화";
     if (a === "public") return "일반";
@@ -749,10 +701,10 @@ export default function MenuManagePage() {
           </div>
         )}
 
-        {/* ✅ 메뉴 추가 */}
         <section className="mt-8 rounded-2xl border p-6">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-semibold">메뉴 추가</h2>
+
             <button
               onClick={addMenu}
               disabled={!canWrite}
@@ -778,7 +730,11 @@ export default function MenuManagePage() {
                 value={form.hasPage ? "page" : "category"}
                 onChange={(e) => {
                   const nextHasPage = e.target.value === "page";
-                  setForm((p) => ({ ...p, hasPage: nextHasPage, slug: nextHasPage ? p.slug : "" }));
+                  setForm((p) => ({
+                    ...p,
+                    hasPage: nextHasPage,
+                    slug: nextHasPage ? p.slug : "",
+                  }));
                 }}
                 className={INPUT_CLASS}
               >
@@ -806,7 +762,12 @@ export default function MenuManagePage() {
               상위 메뉴(소속)
               <select
                 value={form.parentId ?? ""}
-                onChange={(e) => setForm((p) => ({ ...p, parentId: e.target.value ? e.target.value : null }))}
+                onChange={(e) =>
+                  setForm((p) => ({
+                    ...p,
+                    parentId: e.target.value ? e.target.value : null,
+                  }))
+                }
                 className={INPUT_CLASS}
               >
                 {parentOptions.map((o) => (
@@ -826,7 +787,6 @@ export default function MenuManagePage() {
               />
             </label>
 
-            {/* ✅ 접근 등급 */}
             <label className="text-sm">
               접근 등급
               <select
@@ -845,7 +805,12 @@ export default function MenuManagePage() {
               샘플 다운로드 사용
               <select
                 value={form.sampleEnabled ? "yes" : "no"}
-                onChange={(e) => setForm((p) => ({ ...p, sampleEnabled: e.target.value === "yes" }))}
+                onChange={(e) =>
+                  setForm((p) => ({
+                    ...p,
+                    sampleEnabled: e.target.value === "yes",
+                  }))
+                }
                 className={INPUT_CLASS}
               >
                 <option value="no">사용 안 함</option>
@@ -857,31 +822,41 @@ export default function MenuManagePage() {
               샘플 버튼명
               <input
                 value={form.sampleDownloadLabel}
-                onChange={(e) => setForm((p) => ({ ...p, sampleDownloadLabel: e.target.value }))}
+                onChange={(e) =>
+                  setForm((p) => ({
+                    ...p,
+                    sampleDownloadLabel: e.target.value,
+                  }))
+                }
                 className={INPUT_CLASS}
-                placeholder="예) Visit 샘플 다운로드"
+                placeholder="예) CRF 샘플 다운로드"
               />
             </label>
 
             <label className="text-sm md:col-span-2">
-              샘플 파일 업로드
+              샘플 파일 경로
               <input
-                type="file"
-                accept=".xlsx,.xls,.csv,.zip,.pdf,.doc,.docx"
+                value={form.sampleDownloadUrl}
+                onChange={(e) =>
+                  setForm((p) => ({
+                    ...p,
+                    sampleDownloadUrl: e.target.value,
+                  }))
+                }
                 className={INPUT_CLASS}
-                onChange={(e) => setNewSampleFile(e.target.files?.[0] ?? null)}
+                placeholder="예) /samples/crf/crf_sample.xlsx"
               />
               <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                {newSampleFile ? `선택 파일: ${newSampleFile.name}` : "메뉴 추가 시 함께 업로드됩니다."}
+                Firebase Storage를 사용하지 않습니다. public 폴더 기준 경로를 입력하세요.
               </div>
             </label>
           </div>
         </section>
 
-        {/* ✅ 메뉴 목록 */}
         <section className="mt-8 rounded-2xl border p-6">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-semibold">메뉴 목록</h2>
+
             <button
               onClick={loadMenus}
               disabled={busy}
@@ -894,7 +869,7 @@ export default function MenuManagePage() {
           <div className="overflow-x-auto">
             <div className="min-w-[980px]">
               <div className="grid grid-cols-[60px_1fr_160px_120px_160px_180px_180px] gap-2 border-b pb-2 text-sm font-semibold">
-                <div> </div>
+                <div />
                 <div>메뉴</div>
                 <div className="text-gray-600 dark:text-gray-300">type</div>
                 <div className="text-gray-600 dark:text-gray-300">group</div>
@@ -924,12 +899,12 @@ export default function MenuManagePage() {
           </div>
         </section>
 
-        {/* ✅ 편집 모달 */}
         {editId && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
             <div className="w-full max-w-xl rounded-2xl bg-white p-6 dark:bg-black">
               <div className="mb-4 flex items-center justify-between">
                 <h3 className="text-lg font-semibold">메뉴 수정</h3>
+
                 <button onClick={() => setEditId("")} className="rounded-lg border px-3 py-1">
                   닫기
                 </button>
@@ -951,7 +926,11 @@ export default function MenuManagePage() {
                     value={edit.hasPage ? "page" : "category"}
                     onChange={(e) => {
                       const nextHasPage = e.target.value === "page";
-                      setEdit((p) => ({ ...p, hasPage: nextHasPage, slug: nextHasPage ? p.slug : "" }));
+                      setEdit((p) => ({
+                        ...p,
+                        hasPage: nextHasPage,
+                        slug: nextHasPage ? p.slug : "",
+                      }));
                     }}
                     className={INPUT_CLASS}
                   >
@@ -979,11 +958,16 @@ export default function MenuManagePage() {
                   상위 메뉴(소속)
                   <select
                     value={edit.parentId ?? ""}
-                    onChange={(e) => setEdit((p) => ({ ...p, parentId: e.target.value ? e.target.value : null }))}
+                    onChange={(e) =>
+                      setEdit((p) => ({
+                        ...p,
+                        parentId: e.target.value ? e.target.value : null,
+                      }))
+                    }
                     className={INPUT_CLASS}
                   >
                     {parentOptions
-                      .filter((o) => o.id !== editId) // ✅ 자기 자신은 상위로 선택 불가
+                      .filter((o) => o.id !== editId)
                       .map((o) => (
                         <option key={String(o.id ?? "null")} value={o.id ?? ""}>
                           {o.label}
@@ -1001,7 +985,6 @@ export default function MenuManagePage() {
                   />
                 </label>
 
-                {/* ✅ 접근 등급 */}
                 <label className="text-sm">
                   접근 등급
                   <select
@@ -1020,7 +1003,12 @@ export default function MenuManagePage() {
                   샘플 다운로드 사용
                   <select
                     value={edit.sampleEnabled ? "yes" : "no"}
-                    onChange={(e) => setEdit((p) => ({ ...p, sampleEnabled: e.target.value === "yes" }))}
+                    onChange={(e) =>
+                      setEdit((p) => ({
+                        ...p,
+                        sampleEnabled: e.target.value === "yes",
+                      }))
+                    }
                     className={INPUT_CLASS}
                   >
                     <option value="no">사용 안 함</option>
@@ -1032,29 +1020,32 @@ export default function MenuManagePage() {
                   샘플 버튼명
                   <input
                     value={edit.sampleDownloadLabel}
-                    onChange={(e) => setEdit((p) => ({ ...p, sampleDownloadLabel: e.target.value }))}
+                    onChange={(e) =>
+                      setEdit((p) => ({
+                        ...p,
+                        sampleDownloadLabel: e.target.value,
+                      }))
+                    }
                     className={INPUT_CLASS}
-                    placeholder="예) Visit 샘플 다운로드"
+                    placeholder="예) CRF 샘플 다운로드"
                   />
                 </label>
 
                 <label className="text-sm md:col-span-2">
-                  샘플 파일 업로드
+                  샘플 파일 경로
                   <input
-                    type="file"
-                    accept=".xlsx,.xls,.csv,.zip,.pdf,.doc,.docx"
+                    value={edit.sampleDownloadUrl}
+                    onChange={(e) =>
+                      setEdit((p) => ({
+                        ...p,
+                        sampleDownloadUrl: e.target.value,
+                      }))
+                    }
                     className={INPUT_CLASS}
-                    onChange={(e) => setEditSampleFile(e.target.files?.[0] ?? null)}
+                    placeholder="예) /samples/crf/crf_sample.xlsx"
                   />
                   <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    {editSampleFile
-                      ? `선택 파일: ${editSampleFile.name}`
-                      : (() => {
-                          const current = menus.find((x) => x.id === editId);
-                          return current?.sampleFileName
-                            ? `현재 파일: ${current.sampleFileName}`
-                            : "현재 연결된 샘플 파일 없음";
-                        })()}
+                    Firebase Storage를 사용하지 않습니다. public 폴더 기준 경로를 입력하세요.
                   </div>
                 </label>
               </div>
@@ -1063,6 +1054,7 @@ export default function MenuManagePage() {
                 <button onClick={() => setEditId("")} className="rounded-xl border px-4 py-2 text-sm">
                   취소
                 </button>
+
                 <button
                   onClick={saveEdit}
                   disabled={!canWrite}
@@ -1079,7 +1071,6 @@ export default function MenuManagePage() {
   );
 }
 
-/** ✅ 트리 Row(드래그 가능) - 버튼 최소화(수정/삭제만) */
 function TreeRow(props: {
   m: MenuDoc & { depth: number; hasChildren: boolean; isOpen: boolean };
   canWrite: boolean;
@@ -1104,8 +1095,7 @@ function TreeRow(props: {
   const indent = m.depth * 20;
   const typeLabel = m.hasPage ? "기능(페이지)" : "카테고리";
   const pathLabel = m.hasPage ? m.path : "(경로 없음)";
-
-  const sampleLabel = m.sampleEnabled ? (m.sampleFileName || "사용") : "-";
+  const sampleLabel = m.sampleEnabled ? m.sampleFileName || m.sampleDownloadUrl || "사용" : "-";
 
   return (
     <div
@@ -1143,15 +1133,14 @@ function TreeRow(props: {
 
       <div className="text-gray-600 dark:text-gray-300">{typeLabel}</div>
       <div className="truncate text-gray-600 dark:text-gray-300">{m.group || "-"}</div>
-
       <div>{accessLabel(m.access)}</div>
-
       <div className="truncate text-gray-600 dark:text-gray-300">{sampleLabel}</div>
 
       <div className="flex justify-end gap-2">
         <button onClick={onEdit} className="rounded-lg border px-3 py-1 hover:bg-gray-50 dark:hover:bg-gray-900">
           수정
         </button>
+
         <button
           onClick={onDelete}
           disabled={!canWrite}
